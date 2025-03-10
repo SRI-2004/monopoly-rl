@@ -1,6 +1,6 @@
 # **Monopoly Reinforcement Learning Optimization**  
 
-This project explores **Reinforcement Learning (RL) strategies for Monopoly**, optimizing decision-making using **Hierarchical RL and Generalized Reinforcement Policy Optimization (GRPO)**. The goal is to efficiently navigate the **high-dimensional action space** in Monopoly, improving sample efficiency and strategic gameplay.  
+This project explores **Reinforcement Learning (RL) strategies for Monopoly**, optimizing decision-making using **Hierarchical RL and Proximal Policy Optimisation and HDQN**. The goal is to efficiently navigate the **high-dimensional action space** in Monopoly, improving sample efficiency and strategic gameplay.  
 
 🔗 **Read more:** [Medium Article on Monopoly RL](#)  
 📄 **Technical Details & Implementation:** [Detailed Documentation](#)  
