@@ -635,10 +635,6 @@ class GameLogic:
             old_position = player.current_position
             new_position = (old_position + roll) % 40
             
-            # Check for passing GO
-            if new_position < old_position:
-                player.add_cash(200) # Standard GO income
-            
             player.move(new_position)
             player.update_phase('post-roll')
 
@@ -651,7 +647,7 @@ class GameLogic:
                 player.add_cash(200)
                 go_income_msg = " Passed GO and collected $200."
 
-            return (f"{player.player_name} rolled {roll} and moved to position {new_position}. "
+            return (f"{player.player_name} rolled {roll} and moved to position {new_position}."
                     f"{go_income_msg}{landing_message} Phase changed to post-roll.")
         elif player.phase == 'post-roll':
             player.update_phase('out-of-turn')

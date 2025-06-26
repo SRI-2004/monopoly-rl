@@ -194,11 +194,7 @@ class MonopolyEnv(gym.Env):
         dense_reward = self.reward_calculator.compute_dense_reward(current_player)
 
         # Determine if the episode is finished.
-        terminated = False
-        for player in self.players:
-            if player.status in ["won", "lost"]:
-                terminated = True
-                break
+        terminated = any(p.status == "won" for p in self.players)
 
         # Check if max steps reached (we mark as truncated if so).
         truncated = False
@@ -259,17 +255,9 @@ class MonopolyEnv(gym.Env):
         """
         Check for and handle player bankruptcy.
         A player is bankrupt if their cash is negative and they have no assets to sell/mortgage.
+        This method is now handled by the core game logic.
         """
-        for i, player in enumerate(self.players):
-            if player.current_cash < 0 and not player.assets:
-                if player.status != 'lost':
-                    player.update_status('lost')
-                    self.game.board.return_player_assets_to_bank(player.player_id)
-                    
-                    # Check for win condition
-                    active_players = [p for p in self.players if p.status != 'lost']
-                    if len(active_players) == 1:
-                        active_players[0].update_status('won')
+        pass
 
     def render(self, mode="human"):
         """

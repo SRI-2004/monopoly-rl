@@ -6,6 +6,7 @@ import json
 import numpy as np
 import sys
 from unittest.mock import patch
+from unittest.mock import MagicMock
 
 # Add the project root to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -386,12 +387,24 @@ class TestGameLogicCards(unittest.TestCase):
     def test_draw_card_pay_money(self):
         """Test drawing a 'pay money' card."""
         initial_cash = self.current_player.current_cash
-        self.game_logic.draw_card(self.current_player, "community_chest") # First card is pay $50
+        card_to_draw = {"action": "pay_money", "amount": 50, "description": "Pay hospital fees of $50."}
+        
+        # Create a mock deck with a pop method that returns our card
+        mock_deck = MagicMock()
+        mock_deck.pop.return_value = card_to_draw
+        self.game_logic.board.community_chest_cards = mock_deck
+
+        self.game_logic.draw_card(self.current_player, "community_chest")
         self.assertEqual(self.current_player.current_cash, initial_cash - 50)
 
     def test_draw_card_get_out_of_jail(self):
         """Test drawing a 'get out of jail free' card."""
-        self.game_logic.board.community_chest_cards.pop(0) # Remove the first card
+        card_to_draw = {"action": "get_out_of_jail_card", "description": "Get Out of Jail Free."}
+        
+        mock_deck = MagicMock()
+        mock_deck.pop.return_value = card_to_draw
+        self.game_logic.board.community_chest_cards = mock_deck
+        
         self.game_logic.draw_card(self.current_player, "community_chest")
         self.assertTrue(self.current_player.has_get_out_of_jail_community_chest_card)
 
