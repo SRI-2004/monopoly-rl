@@ -337,6 +337,25 @@ class TestMonopolyEnv(unittest.TestCase):
         self.assertNotEqual(owner.status, 'won') # Game should not be over
         self.assertFalse(terminated)
 
+    def test_observation_space_with_trade(self):
+        """Test that the observation space correctly reflects a pending trade."""
+        self.env.reset()
+        # Manually create a pending trade
+        trade = {
+            "from_player": self.env.game.players[0],
+            "to_player": self.env.game.players[1],
+            "property_index": 0,
+            "offer_price": 100
+        }
+        self.env.game.pending_trade = trade
+        
+        obs = self.env._get_obs()
+        
+        self.assertEqual(obs['pending_trade_valid'], 1)
+        self.assertNotEqual(np.sum(obs['trade_details']), 0) # Details should be populated
+        # Check if the 'from' player in the trade details is correct (player 0)
+        self.assertAlmostEqual(obs['trade_details'][0], 0.0)
+
 
 if __name__ == '__main__':
     unittest.main()

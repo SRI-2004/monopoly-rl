@@ -5,6 +5,7 @@ import os
 import json
 import numpy as np
 import sys
+from unittest.mock import patch
 
 # Add the project root to the Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -330,6 +331,69 @@ class TestGameLogicActions(unittest.TestCase):
         mask = self.game_logic.get_valid_subactions(self.current_player, 10)
         self.assertTrue(mask.all()) # Both 'yes' and 'no' should be valid
         self.assertEqual(len(mask), 2)
+
+
+class TestGameLogicCards(unittest.TestCase):
+    def setUp(self):
+        self.test_json = "test_board_data.json"
+        # A minimal board with GO, a CC/Chance space, Jail, and a property
+        board_layout = [
+            {"id": 0, "name": "Go", "type": "go"},
+            {"id": 2, "name": "Community Chest", "type": "community_chest"},
+            {"id": 7, "name": "Chance", "type": "chance"},
+            {"id": 10, "name": "Jail", "type": "jail"},
+            {"id": 30, "name": "Go to Jail", "type": "go_to_jail"},
+            {"id": 1, "name": "Test Property", "type": "street", "price": 100, "house_cost": 50, "mortgage_value": 30, "rent": {"base": 2}}
+        ]
+        # Mock card decks
+        self.community_chest_cards = [
+            {"action": "pay_money", "amount": 50, "description": "Pay hospital fees of $50."},
+            {"action": "get_out_of_jail_card", "description": "Get Out of Jail Free."}
+        ]
+        self.chance_cards = [
+            {"action": "collect_money", "amount": 100, "description": "Bank pays you dividend of $100."},
+            {"action": "repair_fee", "house_fee": 25, "hotel_fee": 100, "description": "General repairs."}
+        ]
+        
+        board_data = {
+            "board_layout": board_layout,
+            "community_chest_cards": self.community_chest_cards,
+            "chance_cards": self.chance_cards
+        }
+        with open(self.test_json, "w") as f:
+            json.dump(board_data, f)
+
+        self.players = [Player("Alice"), Player("Bob")]
+        self.game_logic = GameLogic(self.test_json, self.players)
+        self.current_player = self.players[0]
+
+    def tearDown(self):
+        if os.path.exists(self.test_json):
+            os.remove(self.test_json)
+
+    def test_pass_go_income(self):
+        """Test that a player receives income for passing GO."""
+        self.current_player.current_position = 38 # Near GO
+        initial_cash = self.current_player.current_cash
+        
+        # Manually trigger a roll that passes GO
+        with patch.object(self.game_logic, 'roll_dice', return_value=5):
+            self.game_logic.conclude_phase(self.current_player)
+        
+        self.assertEqual(self.current_player.current_position, (38 + 5) % 40)
+        self.assertEqual(self.current_player.current_cash, initial_cash + 200)
+
+    def test_draw_card_pay_money(self):
+        """Test drawing a 'pay money' card."""
+        initial_cash = self.current_player.current_cash
+        self.game_logic.draw_card(self.current_player, "community_chest") # First card is pay $50
+        self.assertEqual(self.current_player.current_cash, initial_cash - 50)
+
+    def test_draw_card_get_out_of_jail(self):
+        """Test drawing a 'get out of jail free' card."""
+        self.game_logic.board.community_chest_cards.pop(0) # Remove the first card
+        self.game_logic.draw_card(self.current_player, "community_chest")
+        self.assertTrue(self.current_player.has_get_out_of_jail_community_chest_card)
 
 
 if __name__ == '__main__':
