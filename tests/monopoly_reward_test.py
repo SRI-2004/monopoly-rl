@@ -5,6 +5,10 @@ import os
 import json
 import numpy as np
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from monopoly_env.core.board import Board
 from monopoly_env.core.player import Player
 from monopoly_env.utils.reward_calculator import RewardCalculator
@@ -26,7 +30,7 @@ class TestRewardCalculator(unittest.TestCase):
                 "mortgage_value": 30,
                 "rent": {"base": 2}
             })
-        board_data = {"properties": properties}
+        board_data = {"board_layout": properties}
         with open(self.test_json, "w") as f:
             json.dump(board_data, f)
         self.board = Board(self.test_json)
