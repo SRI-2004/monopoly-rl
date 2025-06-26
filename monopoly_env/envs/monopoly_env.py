@@ -4,6 +4,7 @@ import numpy as np
 
 from monopoly_env.core import initialize_game
 from monopoly_env.utils.reward_calculator import RewardCalculator
+from monopoly_env import config
 
 
 class MonopolyEnv(gym.Env):
@@ -14,6 +15,9 @@ class MonopolyEnv(gym.Env):
         Dict({
             "player": Box(shape=(16,), dtype=np.float32)  - The current player's state.
             "board": Box(shape=(224,), dtype=np.float32)   - The flattened board state.
+            "current_player_id": Discrete(num_players)
+            "pending_trade_valid": Discrete(2)
+            "trade_details": Box(shape=(4,), dtype=np.float32) # [from, to, prop, price_norm]
         })
 
     Actions:
@@ -28,32 +32,37 @@ class MonopolyEnv(gym.Env):
         For now, rewards are set to 0 by default. You can extend this logic later.
 
     Episode Termination:
-        The episode ends when a player’s status becomes "won" or "lost" or when a maximum
+        The episode ends when a player's status becomes "won" or "lost" or when a maximum
         number of steps is reached.
     """
 
     metadata = {"render.modes": ["human"]}
 
-    def __init__(self, board_json_path="/home/srinivasan/PycharmProjects/monopoly-rl/data.json", player_names=None, max_steps=1000):
+    def __init__(self, board_json_path=config.DEFAULT_BOARD_JSON, num_players=config.NUM_PLAYERS, max_steps=config.MAX_STEPS, player_names=config.PLAYER_NAMES):
         super(MonopolyEnv, self).__init__()
 
         # Set default player names if none are provided.
-        if player_names is None:
-            player_names = ["Bob", "Charlie", "Diana"]
+        if num_players > len(config.PLAYER_NAMES):
+            raise ValueError(f"Not enough player names in config for {num_players} players.")
+        
+        player_names = config.PLAYER_NAMES[:num_players]
 
         self.max_steps = max_steps
         self.current_step = 0
 
         # Define observation space: a dict with player and board states.
         self.observation_space = spaces.Dict({
-            "player": spaces.Box(low=-np.inf, high=np.inf, shape=(16,), dtype=np.float32),
-            "board": spaces.Box(low=-np.inf, high=np.inf, shape=(224,), dtype=np.float32)
+            "player": spaces.Box(low=-np.inf, high=np.inf, shape=(config.PLAYER_DIM,), dtype=np.float32),
+            "board": spaces.Box(low=-np.inf, high=np.inf, shape=(config.BOARD_DIM,), dtype=np.float32),
+            "current_player_id": spaces.Discrete(num_players),
+            "pending_trade_valid": spaces.Discrete(2),
+            "trade_details": spaces.Box(low=0, high=1, shape=(4,), dtype=np.float32) # [from, to, prop, price_norm]
         })
 
         # Define action space:
         # Top-level actions: 12 discrete choices.
         # Sub-action: Discrete(252) covers the maximum parameter space needed.
-        self.action_space = spaces.MultiDiscrete([12, 252])
+        self.action_space = spaces.MultiDiscrete([config.TOP_LEVEL_ACTIONS, config.SUB_ACTION_DIM])
 
 
         # Initialize game logic using our core initializer.
@@ -63,7 +72,13 @@ class MonopolyEnv(gym.Env):
 
         # Ensure game logic's current player index is set to 0.
         self.game.current_player_index = 0
-        self.reward_calculator = RewardCalculator(self.game.board, self.game.players)
+        self.reward_calculator = RewardCalculator(
+            self.game.board, 
+            self.game.players,
+            cash_threshold=config.CASH_THRESHOLD,
+            penalty_beta=config.PENALTY_BETA,
+            win_bonus=config.WIN_BONUS
+        )
 
         # Reset the environment to start a new game.
         self.reset()
@@ -98,7 +113,7 @@ class MonopolyEnv(gym.Env):
             player.current_position = 0
             player.update_status("waiting_for_move")
             player.update_phase("pre-roll")
-            player.current_cash = 1500
+            player.current_cash = config.STARTING_CASH
             player.assets = set()
             player.full_color_sets_possessed = set()
             player.mortgaged_assets = set()
@@ -109,6 +124,8 @@ class MonopolyEnv(gym.Env):
         # Clear any pending trades and set the current player to the first.
         self.game.pending_trade = None
         self.game.current_player_index = 0
+
+        self.reward_calculator.reset_baseline(self.game.players)
 
         obs = self._get_obs()
         info = {}
@@ -136,41 +153,26 @@ class MonopolyEnv(gym.Env):
         # Get the current player.
         current_player = self.players[self.game.current_player_index]
 
+        # --- Action Validation ---
+        # 1. Check if the action is within the defined action space bounds.
+        if not self.action_space.contains(action):
+            return self._get_obs(), -1.0, False, False, {"error": "Action out of bounds."}
+
         # Retrieve the valid top-level actions mask for the current player.
         valid_actions = self.game.get_valid_actions(current_player)
 
-        # Check if the chosen top-level action is valid.
+        # 2. Check if the chosen top-level action is logically valid in the current game state.
         if not valid_actions[top_level_action]:
-            result_msg = (f"Action {top_level_action + 1} is not valid in the current phase "
-                          f"for {current_player.player_name}.")
-            reward = -1.0  # Negative reward for choosing an invalid top-level action.
-            terminated = False
-            truncated = False
             info = {"error": "Invalid top-level action selected according to valid actions mask."}
-            return self._get_obs(), reward, terminated, truncated, info
+            return self._get_obs(), -1.0, False, False, info
 
-        # For top-level actions that require sub-actions, check the sub-action validity.
+        # 3. For top-level actions that require sub-actions, check the sub-action validity.
         actions_with_sub = {0, 1, 2, 3, 4, 5, 10, 11}
         if top_level_action in actions_with_sub:
             valid_sub_mask = self.game.get_valid_subactions(current_player, top_level_action)
-            # Check that the provided sub_action index is within range.
-            if sub_action < 0 or sub_action >= len(valid_sub_mask):
-                result_msg = (f"Sub-action index {sub_action} out of range for top-level action "
-                              f"{top_level_action + 1}.")
-                reward = -1.0  # Negative reward for out-of-range sub-action.
-                terminated = False
-                truncated = False
-                info = {"error": "Sub-action index out of range."}
-                return self._get_obs(), reward, terminated, truncated, info
-            # Check if the selected sub-action is valid.
-            if not valid_sub_mask[sub_action]:
-                result_msg = (f"Sub-action {sub_action} is not valid for top-level action "
-                              f"{top_level_action + 1} for {current_player.player_name}.")
-                reward = -1.0  # Negative reward for an invalid sub-action.
-                terminated = False
-                truncated = False
+            if sub_action < 0 or sub_action >= len(valid_sub_mask) or not valid_sub_mask[sub_action]:
                 info = {"error": "Invalid sub-action selected according to valid sub-actions mask."}
-                return self._get_obs(), reward, terminated, truncated, info
+                return self._get_obs(), -1.0, False, False, info
 
         # Adjust the top-level action to match game_logic expectations (1-indexed).
         adjusted_action = top_level_action + 1
@@ -178,6 +180,8 @@ class MonopolyEnv(gym.Env):
         try:
             # Process the action using the game logic.
             result_msg = self.game.process_action(adjusted_action, sub_action)
+            # Immediately handle bankruptcy after an action, as cash levels might have changed.
+            self._handle_bankruptcy()
         except Exception as e:
             result_msg = f"Error: {str(e)}"
             reward = -1.0
@@ -224,8 +228,48 @@ class MonopolyEnv(gym.Env):
 
         # Board state (flattened to 224 dims).
         board_state = self.game.board.get_state(flatten=True)
+        
+        # Trade details
+        trade = self.game.pending_trade
+        pending_trade_valid = 1 if trade else 0
+        trade_details = np.zeros(4, dtype=np.float32)
+        if trade:
+            # Normalize trade details to be [0, 1]
+            from_player_idx = self.game.players.index(trade['from_player'])
+            to_player_idx = self.game.players.index(trade['to_player'])
+            prop_idx = trade['property_index']
+            price = trade['offer_price']
+            
+            trade_details[0] = from_player_idx / (len(self.players) -1) if len(self.players) > 1 else 0
+            trade_details[1] = to_player_idx / (len(self.players) -1) if len(self.players) > 1 else 0
+            trade_details[2] = prop_idx / (self.game.board.num_properties - 1) if self.game.board.num_properties > 1 else 0
+            # Normalize price by max possible cash, assume it's starting cash * 2 for simplicity
+            max_price = config.STARTING_CASH * 2 
+            trade_details[3] = price / max_price
 
-        return {"player": player_state, "board": board_state}
+        return {
+            "player": player_state, 
+            "board": board_state,
+            "current_player_id": self.game.current_player_index,
+            "pending_trade_valid": pending_trade_valid,
+            "trade_details": trade_details
+        }
+
+    def _handle_bankruptcy(self):
+        """
+        Check for and handle player bankruptcy.
+        A player is bankrupt if their cash is negative and they have no assets to sell/mortgage.
+        """
+        for i, player in enumerate(self.players):
+            if player.current_cash < 0 and not player.assets:
+                if player.status != 'lost':
+                    player.update_status('lost')
+                    self.game.board.return_player_assets_to_bank(player.player_id)
+                    
+                    # Check for win condition
+                    active_players = [p for p in self.players if p.status != 'lost']
+                    if len(active_players) == 1:
+                        active_players[0].update_status('won')
 
     def render(self, mode="human"):
         """

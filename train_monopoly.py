@@ -153,7 +153,7 @@ def train_ppo(total_timesteps=100_000, num_envs=4):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--algo", type=str, default="hdqn", help="Algorithm to use (currently only 'hdqn' is supported)")
-    parser.add_argument("--episodes", type=int, default=500, help="Number of episodes")
+    parser.add_argument("--episodes", type=int, default=100, help="Number of episodes")
     parser.add_argument("--max_steps", type=int, default=1000, help="Max steps per episode")
     parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")

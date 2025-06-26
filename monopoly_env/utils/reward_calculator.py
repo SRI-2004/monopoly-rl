@@ -17,7 +17,7 @@ class RewardCalculator:
                 number_of_houses = house_fraction / 0.25
                 contribution = (basePrice - mortgageValue) * 2 + (house_cost * number_of_houses)
       - Undeveloped Properties:
-            If the property’s color group is fully owned by the player, multiplier = 1.5;
+            If the property's color group is fully owned by the player, multiplier = 1.5;
             otherwise, multiplier = 1.25.
                 contribution = (basePrice - mortgageValue) * multiplier
       - Cash Contribution:
@@ -56,6 +56,9 @@ class RewardCalculator:
         self.win_bonus = win_bonus
 
         # Initialize previous net worth for each player.
+        self.prev_networth = {p.player_name: self.compute_networth(p) for p in players}
+
+    def reset_baseline(self, players):
         self.prev_networth = {p.player_name: self.compute_networth(p) for p in players}
 
     def compute_networth(self, player):
@@ -123,8 +126,7 @@ class RewardCalculator:
                     # Get all property ids for this color.
                     all_color_ids = np.array([prop["id"] for prop in props if prop.get("color_group", "") == color])
                     # If the player owns the full color set, use a multiplier of 1.5; otherwise, 1.25.
-                    multiplier = 1.5 if (
-                                all_color_ids.size > 0 and set(all_color_ids).issubset(player.assets)) else 1.25
+                    multiplier = 1.5 if (set(all_color_ids).issubset(player.assets)) else 1.25
                     contributions[i] = (base_prices[i] - mortgage_values[i]) * multiplier
 
         # Add all property contributions to the net worth.
@@ -163,7 +165,7 @@ class RewardCalculator:
         ratio_prev = prev_cp_net / max(self.epsilon, opponents_prev_net)
 
         r1 = ratio_current - ratio_prev
-        r2 = np.log(cp_net / (prev_cp_net + self.epsilon))
+        r2 = np.log(cp_net / (prev_cp_net + self.epsilon)) if prev_cp_net > 0 and cp_net > 0 else 0
 
         # Update previous net worth for the next step.
         self.prev_networth = current_networth

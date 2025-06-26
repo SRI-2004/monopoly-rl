@@ -28,6 +28,7 @@ DEFAULT_BOARD_JSON = "data.json"  # Default path to the board data JSON file
 # -------------------------
 NUM_PLAYERS = 4                 # Default number of players
 STARTING_CASH = 1500            # Starting cash for each player
+PLAYER_NAMES = ["Alice", "Bob", "Charlie", "Diana"] # Default player names
 
 # -------------------------
 # Reward Parameters

@@ -1,0 +1,9 @@
+.idea
+runs
+*__pycache__
+*.png
+*.zip
+*.pth
+*.pytest_cache
+*.gitignore
+*.cursorignore

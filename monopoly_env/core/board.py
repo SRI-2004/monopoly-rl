@@ -1,6 +1,7 @@
 import json
 import numpy as np
 import os
+import random
 
 
 class Board:
@@ -16,36 +17,69 @@ class Board:
     Total dimensions: 28 * 8 = 224.
     """
 
-    def __init__(self, json_filepath):
+    def __init__(self, json_filepath, num_players=3):
         """
         Initialize the Board.
 
         Parameters:
             json_filepath (str): Path to the JSON file containing board details.
+            num_players (int): The number of players in the game.
         """
         self.json_filepath = json_filepath
-        self.properties_meta = self._load_board_data(json_filepath)
-
-        # Create a mapping from property ID to index in our state array.
-        # Assumes the JSON file contains exactly the 28 buyable properties.
-        self.property_id_to_index = {}
-        self.num_properties = len(self.properties_meta)  # Expected to be 28.
+        self.board_layout = self._load_board_layout(json_filepath)
+        self.board_map = {space['id']: space for space in self.board_layout}
+        
+        # Filter the full layout to get just the buyable properties for the state vector
+        self.properties_meta = [p for p in self.board_layout if p.get("price")]
+        
+        # Create a mapping from property ID to its index in our state array (of 28 properties)
+        self.property_id_to_index = {prop["id"]: i for i, prop in enumerate(self.properties_meta)}
+        self.num_properties = len(self.properties_meta)
         self.num_dims = 8  # 8 dimensions per property.
-        self.num_owners = 4  # One-hot vector: [bank, player1, player2, player3].
+        self.num_owners = num_players + 1  # One-hot vector: [bank, player1, player2, ...].
+
+        # Load card decks
+        self.chance_cards = []
+        self.community_chest_cards = []
+        self._load_cards(json_filepath)
+        self.chance_discard = []
+        self.community_chest_discard = []
 
         # Initialize the board state.
         self.reset()
 
-    def _load_board_data(self, filepath):
-        """Load board data from a JSON file."""
+    def _load_board_layout(self, filepath):
+        """Load the full board layout from a JSON file."""
         if not os.path.exists(filepath):
             raise FileNotFoundError(f"JSON file not found: {filepath}")
         with open(filepath, "r") as f:
             data = json.load(f)
-        properties = data.get("properties", [])
-        # Sort properties by id to maintain a consistent order.
-        properties = sorted(properties, key=lambda x: x["id"])
-        return properties
+        # Sort by id to ensure order
+        return sorted(data.get("board_layout", []), key=lambda x: x["id"])
+
+    def _load_cards(self, filepath):
+        """Load the card decks from the JSON file."""
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        self.chance_cards = data.get("chance_cards", [])
+        self.community_chest_cards = data.get("community_chest_cards", [])
+
+    def shuffle_decks(self):
+        """Shuffle both card decks."""
+        # Move any discarded cards back into the main decks
+        self.chance_cards.extend(self.chance_discard)
+        self.community_chest_cards.extend(self.community_chest_discard)
+        self.chance_discard = []
+        self.community_chest_discard = []
+        
+        random.shuffle(self.chance_cards)
+        random.shuffle(self.community_chest_cards)
+
+    def get_property_meta_by_board_id(self, board_id):
+        """
+        Retrieve the metadata for any space on the board given its ID (position).
+        """
+        return self.board_map.get(board_id)
 
     def reset(self):
         """
@@ -75,6 +109,8 @@ class Board:
             self.state[idx, 6] = 0.0
             self.state[idx, 7] = 0.0
 
+        self.shuffle_decks()
+
     def get_state(self, flatten=True):
         """
         Return the current board state.
@@ -97,9 +133,11 @@ class Board:
         Returns:
             dict: Property details from the JSON meta.
         """
+        if property_id not in self.property_id_to_index:
+            raise ValueError(f"Property id {property_id} not found in the state vector.")
+        
+        # Find the property in the original list of 28.
         idx = self.property_id_to_index.get(property_id)
-        if idx is None:
-            raise ValueError(f"Property id {property_id} not found.")
         return self.properties_meta[idx]
 
     def purchase_property(self, property_id, player_id):
@@ -118,13 +156,16 @@ class Board:
         if player_id < 1 or player_id >= self.num_owners:
             raise ValueError(f"Invalid player_id. Must be between 1 and {self.num_owners - 1}.")
 
+        if property_id not in self.property_id_to_index:
+            raise ValueError(f"Property id {property_id} not found in the state vector.")
+            
         idx = self.property_id_to_index.get(property_id)
-        if idx is None:
-            raise ValueError(f"Property id {property_id} not found.")
 
         current_owner = self.state[idx, 0:self.num_owners]
         # Only allow purchase if the bank currently owns the property.
-        if not np.array_equal(current_owner, np.array([1, 0, 0, 0], dtype=np.float32)):
+        bank_owner_vector = np.zeros(self.num_owners, dtype=np.float32)
+        bank_owner_vector[0] = 1
+        if not np.array_equal(current_owner, bank_owner_vector):
             raise Exception("Property is already owned by someone.")
 
         # Update owner: set all zeros then mark the player's index.
@@ -139,9 +180,9 @@ class Board:
         Parameters:
             property_id (int): The property to mortgage.
         """
+        if property_id not in self.property_id_to_index:
+            raise ValueError(f"Property id {property_id} not found in the state vector.")
         idx = self.property_id_to_index.get(property_id)
-        if idx is None:
-            raise ValueError(f"Property id {property_id} not found.")
         self.state[idx, 4] = 1  # Mortgage flag.
 
     def unmortgage_property(self, property_id):
@@ -151,9 +192,9 @@ class Board:
         Parameters:
             property_id (int): The property to unmortgage.
         """
+        if property_id not in self.property_id_to_index:
+            raise ValueError(f"Property id {property_id} not found in the state vector.")
         idx = self.property_id_to_index.get(property_id)
-        if idx is None:
-            raise ValueError(f"Property id {property_id} not found.")
         self.state[idx, 4] = 0
 
     def set_buildings(self, property_id, house_fraction, hotel_fraction):
@@ -168,9 +209,9 @@ class Board:
         Raises:
             ValueError: If the provided fractions are outside [0.0, 1.0].
         """
+        if property_id not in self.property_id_to_index:
+            raise ValueError(f"Property id {property_id} not found in the state vector.")
         idx = self.property_id_to_index.get(property_id)
-        if idx is None:
-            raise ValueError(f"Property id {property_id} not found.")
 
         if not (0.0 <= house_fraction <= 1.0 and 0.0 <= hotel_fraction <= 1.0):
             raise ValueError("house_fraction and hotel_fraction must be between 0.0 and 1.0")
@@ -189,11 +230,11 @@ class Board:
         """
         # Get indices of properties in the specified color group.
         indices = [
-            idx for idx, prop in enumerate(self.properties_meta)
+            self.property_id_to_index[prop["id"]] for prop in self.properties_meta
             if prop.get("color_group") == color_group
         ]
         if not indices:
-            raise ValueError(f"No properties found for color group: {color_group}")
+            return # No properties of this color, or they are not in the state vector.
 
         # Check owners and mortgage status.
         owners = []

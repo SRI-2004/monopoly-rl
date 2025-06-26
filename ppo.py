@@ -5,7 +5,7 @@ from stable_baselines3.common.vec_env import SubprocVecEnv
 from stable_baselines3.common.env_checker import check_env
 import argparse
 from monopoly_env.envs.monopoly_env import MonopolyEnv
-
+from stable_baselines3.common.monitor import Monitor
 
 def make_env(seed: int):
     """
@@ -13,7 +13,8 @@ def make_env(seed: int):
     """
 
     def _init():
-        env = MonopolyEnv()  # You can pass additional parameters if needed.
+        env = MonopolyEnv()
+        env = Monitor(env)# You can pass additional parameters if needed.
         env.seed(seed)
         return env
 
