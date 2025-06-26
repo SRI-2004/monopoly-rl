@@ -52,4 +52,11 @@ PHASES = {
 # -------------------------
 # Additional Settings
 # -------------------------
-MAX_STEPS = 1000                # Maximum number of steps per episode (can be overridden in the envs)
+MAX_STEPS = 500                # Maximum number of steps per episode (can be overridden in the envs)
+NUM_EPISODES = 1000
+
+# New keys have been added to the observation space (see MonopolyEnv):
+# - current_player_id: Discrete(num_players)
+# - pending_trade_valid: Discrete(2)
+# - trade_details: Box(4,)
+TRADE_DETAILS_DIM = 4

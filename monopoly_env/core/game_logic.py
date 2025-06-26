@@ -645,8 +645,14 @@ class GameLogic:
             # After moving, handle landing on the new space
             landing_message = self._handle_landing(player)
 
+            # Award GO income if the player passed GO
+            go_income_msg = ""
+            if new_position < old_position:
+                player.add_cash(200)
+                go_income_msg = " Passed GO and collected $200."
+
             return (f"{player.player_name} rolled {roll} and moved to position {new_position}. "
-                    f"{landing_message} Phase changed to post-roll.")
+                    f"{go_income_msg}{landing_message} Phase changed to post-roll.")
         elif player.phase == 'post-roll':
             player.update_phase('out-of-turn')
             return (f"{player.player_name} concluded post-roll. Phase changed to out-of-turn.")
@@ -675,27 +681,51 @@ class GameLogic:
 
         card = deck.pop(0)
         action = card["action"]
-        text = card["text"]
+        text = card.get("description", "No description.") # Use description key
         
         message = f"{player.player_name} drew a {deck_type} card: {text}"
 
-        if action == "collect":
+        if action == "collect_money":
             player.add_cash(card["amount"])
-        elif action == "pay":
+        elif action == "pay_money":
             self._handle_payment(player, None, card["amount"])
         elif action == "go_to_jail":
             self._go_to_jail(player)
-        elif action == "get_out_of_jail":
+        elif action == "get_out_of_jail_card":
             if deck_type == "chance":
                 player.has_get_out_of_jail_chance_card = True
             else:
                 player.has_get_out_of_jail_community_chest_card = True
+        elif action == "move_to":
+            target_space = next((s for s in self.board.board_layout if s['name'] == card['target']), None)
+            if target_space:
+                player.move(target_space['id'])
+                # Handle passing GO if moving to a space with a lower ID (e.g. from jail to Go)
+                if player.current_position < player.current_position:
+                    player.add_cash(200)
+                message += " " + self._handle_landing(player)
+        elif action == "repair_fee":
+            repair_cost = self._calculate_repair_cost(player, card["house_fee"], card["hotel_fee"])
+            self._handle_payment(player, None, repair_cost)
         
         # Non-persistent cards are discarded
-        if action != "get_out_of_jail":
+        if action != "get_out_of_jail_card":
             discard_pile.append(card)
             
         return message
+
+    def _calculate_repair_cost(self, player, house_fee, hotel_fee):
+        """Calculate total repair cost based on a player's houses and hotels."""
+        cost = 0
+        for prop_id in player.assets:
+            idx = self.board.property_id_to_index.get(prop_id)
+            if idx is not None:
+                prop_state = self.board.state[idx]
+                num_houses = int(round(prop_state[6] / 0.25)) if prop_state[7] == 0 else 0
+                num_hotels = 1 if prop_state[7] > 0 else 0
+                cost += num_houses * house_fee
+                cost += num_hotels * hotel_fee
+        return cost
 
     def _calculate_rent(self, property_meta, owner):
         """
