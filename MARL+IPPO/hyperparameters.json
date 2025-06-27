@@ -1,0 +1,58 @@
+{
+    "global": {
+      "optimizer": "AdamW",
+      "lr": "linear:0.00025->0.0000025",
+      "num_players": 4,
+      "max_steps": 1000,
+      "total_timesteps": 15000000,
+      "cuda": true,
+      "gamma": 0.997,
+      "gae_lambda": 0.95,
+      "clip_coef": 0.15,
+      "update_epochs": 8,
+      "entropy_coef": 0.008,
+      "vf_coef": 0.5,
+      "num_envs": 16,
+      "num_steps": 256,
+      "minibatch_size": 4096,
+      "seed": 42,
+      "hidden_dim": 128,
+      "hidden_layers": 2,
+      "activation": "tanh",
+      "orthogonal_init": true,
+      "layer_norm": true,
+      "norm_adv": true,
+      "clip_vloss": true,
+      "max_grad_norm": 0.5
+    },
+    "per_agent": {
+      "player_0": {
+        "optimizer": "AdamW",
+        "lr": "linear:3e-4->3e-5",
+        "entropy_schedule": "linear:0.02->0.002",
+        "clip_schedule": "piecewise:0.25"
+      },
+      "player_1": {
+        "optimizer": "RMSprop",
+        "lr": 0.00025,
+        "rmsprop_alpha": 0.95,
+        "entropy_schedule": "fixed:0.008",
+        "clip_schedule": "piecewise:0.15"
+      },
+      "player_2": {
+        "optimizer": "Adam",
+        "lr": "cosine:1.5e-4->5e-6",
+        "entropy_schedule": "linear:0.005->0.001",
+        "gamma": 0.999,
+        "gae_lambda": 0.98
+      },
+      "player_3": {
+        "optimizer": "AdamW",
+        "lr": "piecewise:0.0004->0.0002@3000000",
+        "clip_schedule": "piecewise:0.1",
+        "update_epochs": 4,
+        "entropy_schedule": "linear:0.01->0.003"
+      }
+    }
+  }
+  
