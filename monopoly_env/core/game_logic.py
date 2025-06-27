@@ -21,10 +21,129 @@ class GameLogic:
             board_json_path (str): Path to the JSON file with board and card details.
             players (list): A list of Player objects.
         """
-        self.board = Board(board_json_path)
+        self.board = Board(board_json_path, num_players=len(players))
         self.players = players
         self.current_player_index = 0  # index into self.players
         self.pending_trade = None  # Holds pending trade offer details
+
+    def _handle_payment(self, from_player, to_player, amount):
+        """
+        Handles a payment from one player to another (or to the bank).
+        Checks for bankruptcy if the player cannot pay.
+        """
+        if from_player.current_cash < amount:
+            # For now, simple bankruptcy. A more complex system could allow asset selling.
+            self._declare_bankruptcy(from_player)
+            return f"{from_player.player_name} cannot pay {amount} and goes bankrupt."
+
+        from_player.subtract_cash(amount)
+        if to_player:  # to_player can be None if paying the bank
+            to_player.add_cash(amount)
+        
+        return f"{from_player.player_name} paid {amount} to {to_player.player_name if to_player else 'the bank'}."
+
+    def _declare_bankruptcy(self, player):
+        """
+        Handles a player's bankruptcy.
+        """
+        player.update_status('lost')
+        # Reset player's assets, revert properties to the bank.
+        for prop_id in list(player.assets):
+            player.remove_asset(prop_id)
+            idx = self.board.property_id_to_index[prop_id]
+            
+            # Revert ownership to the bank
+            owner_vector = np.zeros(self.board.num_owners, dtype=np.float32)
+            owner_vector[0] = 1
+            self.board.state[idx, 0:self.board.num_owners] = owner_vector
+            
+            # Reset houses/hotels and mortgage status
+            self.board.state[idx, 4] = 0  # Unmortgaged
+            self.board.state[idx, 6] = 0.0 # No houses
+            self.board.state[idx, 7] = 0.0 # No hotels
+        
+        player.assets.clear()
+
+        # Check for a winner
+        self._check_for_winner()
+
+    def _check_for_winner(self):
+        """
+        Checks if there is only one player left who has not lost.
+        If so, declares them the winner.
+        """
+        active_players = [p for p in self.players if p.status != 'lost']
+        if len(active_players) == 1:
+            active_players[0].update_status('won')
+
+    def _go_to_jail(self, player):
+        """
+        Sends a player to jail.
+        """
+        jail_space = next((s for s in self.board.board_layout if s['type'] == 'jail'), None)
+        if not jail_space:
+            raise Exception("Jail space not found in board layout.")
+            
+        player.move(jail_space['id'])
+        player.go_to_jail()
+        player.update_phase('post-roll') # End their turn movement
+        return f"{player.player_name} was sent to jail!"
+
+    def _handle_landing(self, player):
+        """
+        Handles the logic for a player landing on a specific board space.
+        """
+        landed_position = player.current_position
+        space = self.board.get_property_meta_by_board_id(landed_position)
+
+        if not space:
+            return "Landed on an unknown space."
+
+        space_type = space.get("type")
+
+        if space_type == "go_to_jail":
+            return self._go_to_jail(player)
+            
+        elif space_type == "tax":
+            tax_amount = space.get("amount", 200) # Default to 200 if not specified
+            return f"Landed on {space['name']}. " + self._handle_payment(player, None, tax_amount)
+
+        elif space_type == "community_chest":
+            return self.draw_card(player, "community_chest")
+
+        elif space_type == "chance":
+            return self.draw_card(player, "chance")
+
+        elif space_type in ["street", "railroad", "utility"]:
+            # It's a property. Check ownership.
+            prop_idx = self.board.property_id_to_index.get(space["id"])
+            if prop_idx is None:
+                # This should not happen if the space type is a property
+                return "Error: Landed on a property that is not in the state representation."
+
+            owner_vector = self.board.state[prop_idx, 0:self.board.num_owners]
+            owner_index = np.argmax(owner_vector)
+
+            if owner_index == 0:  # Owned by the bank
+                player.set_option_to_buy(True)
+                return f"Landed on unowned property {space['name']}. You can buy it."
+
+            owner_player_index = int(owner_index - 1)
+            if owner_player_index == self.current_player_index:
+                return f"Landed on their own property: {space['name']}."
+
+            # Landed on another player's property
+            owner = self.players[owner_player_index]
+            is_mortgaged = self.board.state[prop_idx, 4] == 1
+            if is_mortgaged:
+                return f"Landed on {space['name']}, but it is mortgaged. No rent paid."
+
+            rent_amount = self._calculate_rent(space, owner)
+            payment_message = self._handle_payment(player, owner, rent_amount)
+            return f"Landed on {space['name']} owned by {owner.player_name}. {payment_message}"
+
+        else: # For 'go', 'jail', 'free_parking', 'chance', 'community_chest'
+            return f"Landed on {space['name']}."
 
     def roll_dice(self):
         """
@@ -85,7 +204,7 @@ class GameLogic:
         elif action == 12:
             return self.respond_to_trade(current_player, sub_action)
         else:
-            raise ValueError("Invalid action index.")
+            raise ValueError(f"Invalid action index: {action}")
 
     def get_valid_actions(self, player):
         """
@@ -131,6 +250,7 @@ class GameLogic:
             # Allow property improvements.
             valid_actions[2] = True  # Improve Property
             valid_actions[3] = True  # Sell House/Hotel
+            valid_actions[4] = True  # Sell Property
             # Allow mortgaging actions.
             valid_actions[5] = True  # Mortgage/Free Mortgage
             # Allow skipping and concluding phase.
@@ -457,7 +577,9 @@ class GameLogic:
 
         # Update board state: revert ownership to bank.
         idx = self.board.property_id_to_index[property_meta["id"]]
-        self.board.state[idx, 0:self.board.num_owners] = [1, 0, 0, 0]
+        owner_vector = np.zeros(self.board.num_owners, dtype=np.float32)
+        owner_vector[0] = 1
+        self.board.state[idx, 0:self.board.num_owners] = owner_vector
         return (f"{player.player_name} sold property {property_meta['name']} to the bank for {sale_price}.")
 
     # 6. Mortgage/Free Mortgage
@@ -503,30 +625,143 @@ class GameLogic:
         - In Out‐of‐Turn: finish any pending trades and move to the next player's Pre‐roll.
         """
         if player.phase == 'pre-roll':
+            if player.currently_in_jail:
+                # If in jail, can't roll to move. Actions are handled by process_action.
+                # Concluding the pre-roll phase transitions to post-roll without moving.
+                player.update_phase('post-roll')
+                return f"{player.player_name} is in jail and cannot move."
+
             roll = self.roll_dice()
-            new_position = (player.current_position + roll) % 40  # standard Monopoly board has 40 positions
+            old_position = player.current_position
+            new_position = (old_position + roll) % 40
+            
             player.move(new_position)
             player.update_phase('post-roll')
-            # Check if landed on a purchasable property.
-            for prop in self.board.properties_meta:
-                # (Assumes each property meta may include a "position" field.)
-                if prop.get("id", None) == new_position:
-                    idx = self.board.property_id_to_index[prop["id"]]
-                    owner_vector = self.board.state[idx, 0:self.board.num_owners]
-                    if (owner_vector == [1, 0, 0, 0]).all():
-                        player.set_option_to_buy(True)
-                        break
-            return (f"{player.player_name} rolled {roll} and moved to position {new_position}. "
-                    "Phase changed to post-roll.")
+
+            # After moving, handle landing on the new space
+            landing_message = self._handle_landing(player)
+
+            # Award GO income if the player passed GO
+            go_income_msg = ""
+            if new_position < old_position:
+                player.add_cash(200)
+                go_income_msg = " Passed GO and collected $200."
+
+            return (f"{player.player_name} rolled {roll} and moved to position {new_position}."
+                    f"{go_income_msg}{landing_message} Phase changed to post-roll.")
         elif player.phase == 'post-roll':
             player.update_phase('out-of-turn')
             return (f"{player.player_name} concluded post-roll. Phase changed to out-of-turn.")
         elif player.phase == 'out-of-turn':
             player.update_phase('pre-roll')
             self.current_player_index = (self.current_player_index + 1) % len(self.players)
+            # Skip players who have lost
+            while self.players[self.current_player_index].status == 'lost':
+                self.current_player_index = (self.current_player_index + 1) % len(self.players)
+                
             return (f"Out-of-turn concluded. Next player is {self.players[self.current_player_index].player_name}.")
         else:
             raise Exception("Unknown phase encountered during conclude_phase.")
+
+    def draw_card(self, player, deck_type):
+        """Draw a card, execute its action, and return a descriptive message."""
+        if deck_type == "chance":
+            deck = self.board.chance_cards
+            discard_pile = self.board.chance_discard
+        else:
+            deck = self.board.community_chest_cards
+            discard_pile = self.board.community_chest_discard
+
+        if not deck:
+            self.board.shuffle_decks()
+
+        card = deck.pop(0)
+        action = card["action"]
+        text = card.get("description", "No description.") # Use description key
+        
+        message = f"{player.player_name} drew a {deck_type} card: {text}"
+
+        if action == "collect_money":
+            player.add_cash(card["amount"])
+        elif action == "pay_money":
+            self._handle_payment(player, None, card["amount"])
+        elif action == "go_to_jail":
+            self._go_to_jail(player)
+        elif action == "get_out_of_jail_card":
+            if deck_type == "chance":
+                player.has_get_out_of_jail_chance_card = True
+            else:
+                player.has_get_out_of_jail_community_chest_card = True
+        elif action == "move_to":
+            target_space = next((s for s in self.board.board_layout if s['name'] == card['target']), None)
+            if target_space:
+                player.move(target_space['id'])
+                # Handle passing GO if moving to a space with a lower ID (e.g. from jail to Go)
+                if player.current_position < player.current_position:
+                    player.add_cash(200)
+                message += " " + self._handle_landing(player)
+        elif action == "repair_fee":
+            repair_cost = self._calculate_repair_cost(player, card["house_fee"], card["hotel_fee"])
+            self._handle_payment(player, None, repair_cost)
+        
+        # Non-persistent cards are discarded
+        if action != "get_out_of_jail_card":
+            discard_pile.append(card)
+            
+        return message
+
+    def _calculate_repair_cost(self, player, house_fee, hotel_fee):
+        """Calculate total repair cost based on a player's houses and hotels."""
+        cost = 0
+        for prop_id in player.assets:
+            idx = self.board.property_id_to_index.get(prop_id)
+            if idx is not None:
+                prop_state = self.board.state[idx]
+                num_houses = int(round(prop_state[6] / 0.25)) if prop_state[7] == 0 else 0
+                num_hotels = 1 if prop_state[7] > 0 else 0
+                cost += num_houses * house_fee
+                cost += num_hotels * hotel_fee
+        return cost
+
+    def _calculate_rent(self, property_meta, owner):
+        """
+        Calculates the rent for a given property based on its type and state.
+        """
+        prop_type = property_meta.get("type")
+        prop_id = property_meta["id"]
+        prop_idx = self.board.property_id_to_index[prop_id]
+        
+        if prop_type == "street":
+            rent_details = property_meta["rent"]
+            house_frac = self.board.state[prop_idx, 6]
+            hotel_frac = self.board.state[prop_idx, 7]
+
+            if hotel_frac > 0:
+                return rent_details["hotel"]
+            
+            if house_frac > 0:
+                num_houses = int(round(house_frac / 0.25))
+                rent_key = {1: "one_house", 2: "two_houses", 3: "three_houses", 4: "four_houses"}[num_houses]
+                return rent_details[rent_key]
+
+            # Unimproved property. Check for monopoly.
+            has_monopoly = self.board.state[prop_idx, 5] == 1
+            return rent_details["base"] * 2 if has_monopoly else rent_details["base"]
+
+        elif prop_type == "railroad":
+            num_railroads = owner.num_railroads_possessed
+            # Rent for railroads: 25, 50, 100, 200 for 1, 2, 3, 4 railroads
+            return 25 * (2**(num_railroads - 1))
+
+        elif prop_type == "utility":
+            num_utilities = owner.num_utilities_possessed
+            # Rent for utilities: 4x dice roll for 1 utility, 10x for 2.
+            # We don't have the last dice roll here, so we'll use an average roll of 7.
+            # This is a simplification and could be improved by passing the dice roll here.
+            last_dice_roll = 7 
+            return last_dice_roll * (4 if num_utilities == 1 else 10)
+
+        return 0
 
     # 9. Use Get Out of Jail
     def use_get_out_of_jail(self, player):
@@ -550,7 +785,7 @@ class GameLogic:
         if player.currently_in_jail:
             if player.current_cash < jail_fine:
                 raise Exception("Not enough cash to pay the jail fine.")
-            player.subtract_cash(jail_fine)
+            self._handle_payment(player, None, jail_fine)
             player.leave_jail()
             return f"{player.player_name} paid a jail fine of {jail_fine} and is now free."
         else:
@@ -559,48 +794,47 @@ class GameLogic:
     # 11. Buy Property
     def buy_property(self, player, sub_action):
         """
-        Purchase an unowned property on which the player just landed.
-
-        The sub_action here is typically a binary flag (e.g., 1 for yes).
+        Allows a player to buy the property they have landed on.
         """
         if not player.can_buy_property():
-            raise Exception("Buying property is not permitted at this time.")
-        if sub_action != 1:
-            return f"{player.player_name} chose not to buy the property."
+            return "You do not have the option to buy a property right now."
 
-        landed_position = player.current_position
-        property_meta = None
-        for prop in self.board.properties_meta:
-            if prop.get("id", None) == landed_position:
-                property_meta = prop
-                break
+        # The sub_action for buying is simple: 1 for "yes", 0 for "no".
+        if sub_action == 0:
+            player.set_option_to_buy(False) # The player declined.
+            return f"{player.player_name} decided not to buy the property."
 
-        if property_meta is None:
-            raise Exception("No property available for purchase at this position.")
+        property_id = player.current_position
+        prop_meta = self.board.get_property_meta_by_board_id(property_id)
+        if not prop_meta:
+            return "Error: Could not find metadata for the current property."
 
-        idx = self.board.property_id_to_index[property_meta["id"]]
-        owner_vector = self.board.state[idx, 0:self.board.num_owners]
-        if not (owner_vector == [1, 0, 0, 0]).all():
-            raise Exception("Property is already owned.")
+        price = prop_meta.get("price")
+        if price is None:
+            return "Error: This property does not have a price."
 
-        price = property_meta.get("price", 0)
         if player.current_cash < price:
-            raise Exception("Not enough cash to purchase the property.")
+            return f"Not enough cash to buy {prop_meta['name']}."
 
+        # Process payment
         player.subtract_cash(price)
-        # Use Board's purchase_property to update ownership.
-        # (Assumes player IDs start at 1; adjust as needed.)
-        self.board.purchase_property(property_meta["id"], self.current_player_index + 1)
-        player.add_asset(property_meta["id"])
+
+        # Assign property
+        player.add_asset(property_id)
+        prop_idx = self.board.property_id_to_index[property_id]
+        
+        owner_vector = np.zeros(self.board.num_owners, dtype=np.float32)
+        owner_vector[player.player_id + 1] = 1.0 # +1 because bank is owner 0
+        self.board.state[prop_idx, 0:self.board.num_owners] = owner_vector
+
+        # Player bought it, so the option is gone.
         player.set_option_to_buy(False)
-        return f"{player.player_name} purchased {property_meta['name']} for {price}."
+        return f"{player.player_name} bought {prop_meta['name']} for ${price}."
 
     # 12. Respond to Trade
     def respond_to_trade(self, player, sub_action):
         """
-        Respond to a pending trade offer.
-
-        The sub_action is binary: 0 = reject, 1 = accept.
+        Allows a player to respond to a pending trade offer.
         """
         if self.pending_trade is None:
             raise Exception("There is no pending trade offer to respond to.")
@@ -614,8 +848,11 @@ class GameLogic:
                 offer_price = trade["offer_price"]
                 if player.current_cash < offer_price:
                     raise Exception("Not enough cash to accept the trade offer.")
-                player.subtract_cash(offer_price)
-                trade["from_player"].add_cash(offer_price)
+                
+                payment_message = self._handle_payment(player, trade["from_player"], offer_price)
+                if "bankrupt" in payment_message:
+                    self.pending_trade = None
+                    return f"{player.player_name} could not afford the trade and went bankrupt."
 
                 # Retrieve property metadata.
                 property_meta = self.board.properties_meta[trade["property_index"]]
@@ -639,8 +876,11 @@ class GameLogic:
                 offer_price = trade["offer_price"]
                 if trade["from_player"].current_cash < offer_price:
                     raise Exception("Offering player lacks sufficient cash for the trade.")
-                trade["from_player"].subtract_cash(offer_price)
-                player.add_cash(offer_price)
+                
+                payment_message = self._handle_payment(trade["from_player"], player, offer_price)
+                if "bankrupt" in payment_message:
+                    self.pending_trade = None
+                    return f"Offering player {trade['from_player'].player_name} went bankrupt trying to buy."
 
                 property_meta = self.board.properties_meta[trade["property_index"]]
                 idx = self.board.property_id_to_index[property_meta["id"]]

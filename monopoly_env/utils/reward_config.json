@@ -1,0 +1,14 @@
+{
+  "gamma": 0.997,
+  "cash_threshold": 200,
+  "cash_penalty_beta": 1.0,
+  "house_contribution_factor": 0.5,
+  "hotel_contribution_factor": 1.0,
+  "avg_dice_roll": 7.0,
+  "buy_bonus": 3.0,
+  "build_bonus_per_house": 1.0,
+  "time_penalty": 0.01,
+  "win_bonus": 1000.0,
+  "log_growth_clip": 5.0,
+  "ratio_clip": 10.0
+} 

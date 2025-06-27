@@ -28,6 +28,7 @@ DEFAULT_BOARD_JSON = "data.json"  # Default path to the board data JSON file
 # -------------------------
 NUM_PLAYERS = 4                 # Default number of players
 STARTING_CASH = 1500            # Starting cash for each player
+PLAYER_NAMES = ["Alice", "Bob", "Charlie", "Diana"] # Default player names
 
 # -------------------------
 # Reward Parameters
@@ -51,4 +52,14 @@ PHASES = {
 # -------------------------
 # Additional Settings
 # -------------------------
-MAX_STEPS = 1000                # Maximum number of steps per episode (can be overridden in the envs)
+MAX_STEPS = 500                # Maximum number of steps per episode (can be overridden in the envs)
+NUM_EPISODES = 1000
+
+# New keys have been added to the observation space (see MonopolyEnv):
+# - current_player_id: Discrete(num_players)
+# - pending_trade_valid: Discrete(2)
+# - trade_details: Box(4,)
+TRADE_DETAILS_DIM = 4
+
+
+REWARD_CONFIG_PATH = "/home/srinivasan/PycharmProjects/monopoly-rl/monopoly_env/utils/reward_config.json"   
