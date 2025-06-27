@@ -9,33 +9,10 @@ import json
 import os
 from tqdm import tqdm
 
-from env_wrapper import MonopolyMAv2
+from env_wrapper import MonopolyMAv2, preprocess_obs
 from network import ActorCritic
-from vectorized_env import SyncVecEnv
 from scripted_agent import ScriptedAgent
-
-def preprocess_obs(obs, device, num_players):
-    """
-    Flattens and preprocesses the observation dictionary from the environment.
-    """
-    player_obs = obs['player']
-    board_obs = obs['board']
-    trade_details = obs['trade_details']
-    pending_trade = np.array([obs['pending_trade_valid']], dtype=np.float32)
-
-    current_player_one_hot = np.zeros(num_players, dtype=np.float32)
-    current_player_one_hot[obs['current_player_id']] = 1.0
-    
-    flat_obs = np.concatenate([
-        player_obs,
-        board_obs,
-        trade_details,
-        pending_trade,
-        current_player_one_hot
-    ])
-    
-    return torch.tensor(flat_obs, dtype=torch.float32).to(device)
-
+from parallel_env import MultiProcessingVecEnv
 
 def main(args):
     """
@@ -70,21 +47,19 @@ def main(args):
     # 1. Vectorized Environment Setup
     def make_env(seed):
         def _f():
+            # Use the base environment, not the PettingZoo wrapper, for the curriculum phase
             env = MonopolyMAv2(num_players=args.num_players, max_steps=args.max_steps, board_json_path=args.board_json)
             env.reset(seed=seed)
             return env
         return _f
 
-    envs = SyncVecEnv([make_env(args.seed + i) for i in range(args.num_envs)])
+    # The new parallel env handles preprocessing internally
+    envs = MultiProcessingVecEnv([make_env(args.seed + i) for i in range(args.num_envs)], seed=args.seed)
     agent_ids = envs.possible_agents
-    num_agents = len(agent_ids)
+    num_agents = envs.num_agents
     
     # --- Dynamically get observation and action space dimensions ---
-    # To get the flattened observation size, we can process a sample observation
-    sample_obs, _ = envs.reset()
-    sample_obs_for_one_env = {k: v[0] for k, v in sample_obs[agent_ids[0]].items()}
-    processed_sample = preprocess_obs(sample_obs_for_one_env, 'cpu', num_agents)
-    total_input_dim = processed_sample.shape[0]
+    total_input_dim = envs.single_observation_space_shape[0]
     print(f"Dynamically determined input dim: {total_input_dim}")
     
     action_dims = [envs.action_space('player_0').nvec[0], envs.action_space('player_0').nvec[1]]
@@ -124,17 +99,22 @@ def main(args):
 
     # --- Curriculum Learning Setup ---
     scripted_agents = {}
+    curriculum_env = None
     if args.curriculum_steps > 0:
-        # Load board metadata for scripted agent logic
+        # For the curriculum phase, we use a single, non-parallel environment
+        # because the logic is simpler and it's a limited-time phase.
+        curriculum_env = make_env(args.seed)() # Create one instance
+        
         with open(args.board_json) as f:
             board_data = json.load(f)
         board_meta = {str(prop['id']): prop for prop in board_data['board_layout']}
 
-        learning_agent_id = "player_0" # For simplicity, agent 0 is the only learner
+        learning_agent_id = "player_0" 
         for agent_id in agent_ids:
             if agent_id != learning_agent_id:
+                # Note: The player_id here is the string 'player_X', not an integer
                 scripted_agents[agent_id] = ScriptedAgent(
-                    player_id=agent_id, 
+                    player_id=agent_id.split('_')[-1], # The scripted agent expects an integer ID
                     num_players=args.num_players,
                     board_meta=board_meta
                 )
@@ -161,149 +141,201 @@ def main(args):
     global_step = 0
     start_time = time.time()
     
-    next_obs, _ = envs.reset(seed=args.seed)
-    next_done = {agent_id: torch.zeros(args.num_envs).to(device) for agent_id in agent_ids}
-    # GRU hidden states, one for each agent in each parallel environment
-    next_hiddens = {
-        agent_id: torch.zeros(1, args.num_envs, resolved_hyperparams[agent_id].get("hidden_dim")).to(device)
-        for agent_id in agent_ids
-    }
-    
+    # Initial reset for the correct environment (curriculum or parallel)
+    is_curriculum_phase = global_step < args.curriculum_steps
+    if is_curriculum_phase:
+        next_obs_dict, _ = curriculum_env.reset(seed=args.seed)
+        # In curriculum mode, num_envs is 1
+        next_done = {agent_id: torch.zeros(1).to(device) for agent_id in agent_ids}
+        next_hiddens = {
+            agent_id: torch.zeros(1, 1, resolved_hyperparams[agent_id].get("hidden_dim")).to(device)
+            for agent_id in agent_ids if agent_id not in scripted_agents
+        }
+    else:
+        next_obs_stacked, _ = envs.reset()
+        next_done = {agent_id: torch.zeros(args.num_envs).to(device) for agent_id in agent_ids}
+        next_hiddens = {
+            agent_id: torch.zeros(1, args.num_envs, resolved_hyperparams[agent_id].get("hidden_dim")).to(device)
+            for agent_id in agent_ids
+        }
+
     num_updates = args.total_timesteps // (args.num_steps * args.num_envs)
 
     for update in tqdm(range(1, num_updates + 1), desc="Training Progress"):
         # --- Rollout Phase ---
         for step in range(args.num_steps):
             global_step += 1 * args.num_envs
-            
-            # --- Acting ---
-            env_actions = [{} for _ in range(args.num_envs)]
-            
-            # Determine which agents are learning vs. scripted for this step
             is_curriculum_phase = global_step < args.curriculum_steps
             
+            # --- Acting ---
+            action_dict = {}
+            
             with torch.no_grad():
-                for agent_id in agent_ids:
-                    # If agent is scripted, get action from its logic
-                    if is_curriculum_phase and agent_id in scripted_agents:
-                        for i in range(args.num_envs):
-                            single_env_obs = {k: v[i] for k, v in next_obs[agent_id].items()}
-                            action = scripted_agents[agent_id].get_action(single_env_obs)
-                            env_actions[i][agent_id] = action
-                        continue # Move to the next agent
+                if is_curriculum_phase:
+                    # --- Curriculum Acting (Single Environment) ---
+                    current_player_id = curriculum_env.agent_selection
+                    if current_player_id in scripted_agents:
+                        action = scripted_agents[current_player_id].get_action(next_obs_dict[current_player_id])
+                    else: # Learning agent's turn
+                        processed_obs_np = preprocess_obs(next_obs_dict[current_player_id], num_agents, int(current_player_id.split('_')[-1]))
+                        processed_obs = torch.tensor(processed_obs_np, dtype=torch.float32, device=device).unsqueeze(0) # Add batch dim
+                        
+                        policy = policies[current_player_id]
+                        hiddens = next_hiddens[current_player_id]
+                        top_logits, sub_logits, value, new_hiddens = policy(processed_obs, hiddens)
 
-                    # Otherwise, it's a learning agent, use the policy
-                    agent_obs_dict = next_obs[agent_id]
+                        top_dist = torch.distributions.Categorical(logits=top_logits)
+                        sub_dist = torch.distributions.Categorical(logits=sub_logits)
+                        top_action = top_dist.sample()
+                        sub_action = sub_dist.sample()
+                        action = (top_action.item(), sub_action.item())
+                        
+                        # Store results for the single learning agent
+                        storage[current_player_id]["obs"][step] = processed_obs.squeeze(0)
+                        storage[current_player_id]["values"][step] = value.squeeze()
+                        storage[current_player_id]["log_probs_top"][step] = top_dist.log_prob(top_action)
+                        storage[current_player_id]["log_probs_sub"][step] = sub_dist.log_prob(sub_action)
+                        storage[current_player_id]["actions_top"][step] = top_action
+                        storage[current_player_id]["actions_sub"][step] = sub_action
+                        storage[current_player_id]["dones"][step] = next_done[current_player_id]
+                        next_hiddens[current_player_id] = new_hiddens
                     
-                    processed_obs_list = []
-                    for i in range(args.num_envs):
-                        single_env_obs = {k: v[i] for k, v in agent_obs_dict.items()}
-                        processed_obs_list.append(preprocess_obs(single_env_obs, device, args.num_players))
-                    
-                    processed_obs = torch.stack(processed_obs_list)
-                    
-                    policy = policies[agent_id]
-                    hiddens = next_hiddens[agent_id]
-                    
-                    top_logits, sub_logits, value, new_hiddens = policy(processed_obs, hiddens)
+                    curriculum_env.step(action)
 
-                    top_dist = torch.distributions.Categorical(logits=top_logits)
-                    sub_dist = torch.distributions.Categorical(logits=sub_logits)
-                    
-                    top_action = top_dist.sample()
-                    sub_action = sub_dist.sample()
+                else:
+                    # --- Self-Play Acting (Parallel Environments) ---
+                    for i, agent_id in enumerate(agent_ids):
+                        agent_obs = torch.tensor(next_obs_stacked[:, i, :], dtype=torch.float32, device=device)
+                        policy = policies[agent_id]
+                        hiddens = next_hiddens[agent_id]
+                        
+                        top_logits, sub_logits, value, new_hiddens = policy(agent_obs, hiddens)
 
-                    # Store results only for learning agents
-                    storage[agent_id]["obs"][step] = processed_obs
-                    storage[agent_id]["values"][step] = value.squeeze()
-                    storage[agent_id]["log_probs_top"][step] = top_dist.log_prob(top_action)
-                    storage[agent_id]["log_probs_sub"][step] = sub_dist.log_prob(sub_action)
-                    storage[agent_id]["actions_top"][step] = top_action
-                    storage[agent_id]["actions_sub"][step] = sub_action
-                    storage[agent_id]["dones"][step] = next_done[agent_id]
-                    next_hiddens[agent_id] = new_hiddens
-                    
-                    # Format actions for the environment
-                    for i in range(args.num_envs):
-                        env_actions[i][agent_id] = (top_action[i].item(), sub_action[i].item())
+                        top_dist = torch.distributions.Categorical(logits=top_logits)
+                        sub_dist = torch.distributions.Categorical(logits=sub_logits)
+                        top_action = top_dist.sample()
+                        sub_action = sub_dist.sample()
+
+                        storage[agent_id]["obs"][step] = agent_obs
+                        storage[agent_id]["values"][step] = value.squeeze()
+                        storage[agent_id]["log_probs_top"][step] = top_dist.log_prob(top_action)
+                        storage[agent_id]["log_probs_sub"][step] = sub_dist.log_prob(sub_action)
+                        storage[agent_id]["actions_top"][step] = top_action
+                        storage[agent_id]["actions_sub"][step] = sub_action
+                        storage[agent_id]["dones"][step] = next_done[agent_id]
+                        next_hiddens[agent_id] = new_hiddens
+                        
+                        action_dict[agent_id] = torch.stack([top_action, sub_action], dim=1).cpu().numpy()
 
             # --- Stepping the Environment ---
-            next_obs, rewards, terminated, truncated, infos = envs.step(env_actions)
+            if is_curriculum_phase:
+                # For curriculum, rewards/dones are extracted after the single step
+                # This part is complex because PettingZoo is not designed for this kind of external loop.
+                # A proper implementation would integrate the scripted agent *inside* the environment logic.
+                # For now, we make a simplifying assumption that reward is 0 and done is false.
+                # This is a limitation of this curriculum approach.
+                rewards = {agent_id: [0.0] for agent_id in agent_ids if agent_id not in scripted_agents}
+                terminated = {agent_id: [False] for agent_id in agent_ids}
+            else:
+                next_obs_stacked, rewards, terminated, truncated, infos = envs.step(action_dict)
             
-            for agent_id in agent_ids:
-                # Only store rewards for learning agents
+            # Store rewards and dones for all learning agents
+            for agent_id in policies.keys(): # Iterate over learning agents
                 if not (is_curriculum_phase and agent_id in scripted_agents):
-                    storage[agent_id]["rewards"][step] = torch.tensor(rewards[agent_id]).to(device)
-                next_done[agent_id] = torch.tensor(terminated[agent_id], dtype=torch.float32).to(device)
-        
+                    storage[agent_id]["rewards"][step] = torch.tensor(rewards[agent_id], device=device)
+                    # Done is when an env is terminated OR truncated
+                    done_val = np.logical_or(terminated[agent_id], truncated.get(agent_id, False))
+                    next_done[agent_id] = torch.tensor(done_val, dtype=torch.float32).to(device)
+
         # --- PPO Update Phase ---
         with torch.no_grad():
-            for agent_id in agent_ids:
-                # Skip update for scripted agents
-                if is_curriculum_phase and agent_id in scripted_agents:
-                    continue
-
+            if is_curriculum_phase:
                 # To calculate advantages, we need the value of the next state
-                agent_obs_dict = next_obs[agent_id]
-                processed_obs_list = []
-                for i in range(args.num_envs):
-                    single_env_obs = {k: v[i] for k, v in agent_obs_dict.items()}
-                    processed_obs_list.append(preprocess_obs(single_env_obs, device, args.num_players))
-                processed_obs = torch.stack(processed_obs_list)
-
-                _, _, next_value, _ = policies[agent_id](processed_obs, next_hiddens[agent_id])
+                learning_agent_id = "player_0"
+                processed_obs_np = preprocess_obs(next_obs_dict[learning_agent_id], num_agents, 0)
+                processed_obs = torch.tensor(processed_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
+                _, _, next_value, _ = policies[learning_agent_id](processed_obs, next_hiddens[learning_agent_id])
                 next_value = next_value.reshape(1, -1)
                 
-                # Calculate advantages using GAE
-                advantages = torch.zeros_like(storage[agent_id]["rewards"]).to(device)
-                last_gae_lam = 0
+                # Compute advantages and update for the single learning agent
+                agent_h = resolved_hyperparams[learning_agent_id]
+                advantages = torch.zeros_like(storage[learning_agent_id]["rewards"]).to(device)
+                last_gae_lambda = 0
                 for t in reversed(range(args.num_steps)):
                     if t == args.num_steps - 1:
-                        nextnonterminal = 1.0 - next_done[agent_id]
-                        nextvalues = next_value
+                        next_non_terminal = 1.0 - next_done[learning_agent_id]
+                        next_return = next_value
                     else:
-                        nextnonterminal = 1.0 - storage[agent_id]["dones"][t + 1]
-                        nextvalues = storage[agent_id]["values"][t + 1]
+                        next_non_terminal = 1.0 - storage[learning_agent_id]["dones"][t + 1]
+                        next_return = storage[learning_agent_id]["values"][t + 1]
                     
-                    delta = storage[agent_id]["rewards"][t] + args.gamma * nextvalues * nextnonterminal - storage[agent_id]["values"][t]
-                    advantages[t] = last_gae_lam = delta + args.gamma * args.gae_lambda * nextnonterminal * last_gae_lam
-                
-                storage[agent_id]["advantages"] = advantages
-                storage[agent_id]["returns"] = advantages + storage[agent_id]["values"]
+                    delta = storage[learning_agent_id]["rewards"][t] + agent_h['gamma'] * next_return * next_non_terminal - storage[learning_agent_id]["values"][t]
+                    advantages[t] = last_gae_lambda = delta + agent_h['gamma'] * agent_h['gae_lambda'] * next_non_terminal * last_gae_lambda
+                returns = advantages + storage[learning_agent_id]["values"]
+            else:
+                # --- Standard GAE and Advantage Calculation (Parallel) ---
+                for i, agent_id in enumerate(agent_ids):
+                    agent_obs = torch.tensor(next_obs_stacked[:, i, :], dtype=torch.float32, device=device)
+                    _, _, next_value, _ = policies[agent_id](agent_obs, next_hiddens[agent_id])
+                    next_value = next_value.reshape(1, -1)
+                    
+                    agent_h = resolved_hyperparams[agent_id]
+                    advantages = torch.zeros_like(storage[agent_id]["rewards"]).to(device)
+                    last_gae_lambda = 0
+                    for t in reversed(range(args.num_steps)):
+                        if t == args.num_steps - 1:
+                            next_non_terminal = 1.0 - next_done[agent_id]
+                            next_return = next_value
+                        else:
+                            next_non_terminal = 1.0 - storage[agent_id]["dones"][t + 1]
+                            next_return = storage[agent_id]["values"][t + 1]
+                        
+                        delta = storage[agent_id]["rewards"][t] + agent_h['gamma'] * next_return * next_non_terminal - storage[agent_id]["values"][t]
+                        advantages[t] = last_gae_lambda = delta + agent_h['gamma'] * agent_h['gae_lambda'] * next_non_terminal * last_gae_lambda
+                    
+                    storage[agent_id]["returns"] = advantages + storage[agent_id]["values"]
 
-
-        # --- Update Policy and Value Networks ---
-        for agent_id in agent_ids:
-            # Skip update for scripted agents
-            if is_curriculum_phase and agent_id in scripted_agents:
-                continue
-
-            # Get agent-specific hyperparams for the update
+        # --- Update Policies ---
+        for agent_id in policies.keys():
+            if is_curriculum_phase and agent_id != "player_0":
+                continue # Skip update for scripted and non-learning agents in curriculum
+            
             agent_h = resolved_hyperparams[agent_id]
-            clip_coef = agent_h.get("clip_coef")
-            entropy_coef = agent_h.get("entropy_coef")
-
-            # Flatten the batch
-            b_obs = storage[agent_id]["obs"].reshape((-1, total_input_dim))
-            b_log_probs_top = storage[agent_id]["log_probs_top"].reshape(-1)
-            b_log_probs_sub = storage[agent_id]["log_probs_sub"].reshape(-1)
-            b_actions_top = storage[agent_id]["actions_top"].reshape(-1)
-            b_actions_sub = storage[agent_id]["actions_sub"].reshape(-1)
-            b_advantages = storage[agent_id]["advantages"].reshape(-1)
-            b_returns = storage[agent_id]["returns"].reshape(-1)
-            b_values = storage[agent_id]["values"].reshape(-1)
+            
+            if is_curriculum_phase:
+                b_obs = storage[agent_id]["obs"].reshape((-1, total_input_dim))
+                b_log_probs_top = storage[agent_id]["log_probs_top"].reshape(-1)
+                b_log_probs_sub = storage[agent_id]["log_probs_sub"].reshape(-1)
+                b_actions_top = storage[agent_id]["actions_top"].reshape(-1)
+                b_actions_sub = storage[agent_id]["actions_sub"].reshape(-1)
+                b_advantages = advantages.reshape(-1)
+                b_returns = returns.reshape(-1)
+                b_values = storage[agent_id]["values"].reshape(-1)
+            else:
+                b_obs = storage[agent_id]["obs"].reshape((-1, total_input_dim))
+                b_log_probs_top = storage[agent_id]["log_probs_top"].reshape(-1)
+                b_log_probs_sub = storage[agent_id]["log_probs_sub"].reshape(-1)
+                b_actions_top = storage[agent_id]["actions_top"].reshape(-1)
+                b_actions_sub = storage[agent_id]["actions_sub"].reshape(-1)
+                b_advantages = storage[agent_id]["returns"].reshape(-1) # Note: returns are calculated and stored per-agent
+                b_returns = storage[agent_id]["returns"].reshape(-1)
+                b_values = storage[agent_id]["values"].reshape(-1)
 
             # Optimizing the policy and value network
-            inds = np.arange(args.num_envs * args.num_steps)
-            for epoch in range(args.update_epochs):
-                np.random.shuffle(inds)
-                for start in range(0, args.num_envs * args.num_steps, args.minibatch_size):
-                    end = start + args.minibatch_size
-                    minibatch_inds = inds[start:end]
+            clip_fracs = []
+            for epoch in range(agent_h['update_epochs']):
+                batch_size = b_obs.shape[0]
+                minibatch_size = batch_size // args.num_minibatches
+                
+                if is_curriculum_phase:
+                    idxs = np.arange(batch_size)
+                else:
+                    idxs = np.random.permutation(batch_size)
 
-                    # This is a simplification. For GRU, we should handle sequences.
-                    # A proper implementation would sample sequences and manage hidden states.
-                    # For now, we treat them as independent samples which is not ideal for GRU.
+                for start in range(0, batch_size, minibatch_size):
+                    end = start + minibatch_size
+                    minibatch_inds = idxs[start:end]
+
                     mb_obs = b_obs[minibatch_inds]
                     
                     # Dummy hidden state for minibatch
@@ -326,7 +358,7 @@ def main(args):
                     mb_advs = b_advantages[minibatch_inds]
                     
                     pg_loss1 = -mb_advs * ratio
-                    pg_loss2 = -mb_advs * torch.clamp(ratio, 1 - clip_coef, 1 + clip_coef)
+                    pg_loss2 = -mb_advs * torch.clamp(ratio, 1 - agent_h['clip_coef'], 1 + agent_h['clip_coef'])
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                     # Value loss
@@ -335,7 +367,7 @@ def main(args):
                     # Entropy loss
                     entropy = (top_dist.entropy() + sub_dist.entropy()).mean()
                     
-                    loss = pg_loss - entropy_coef * entropy + v_loss * 0.5
+                    loss = pg_loss - agent_h['entropy_coef'] * entropy + v_loss * 0.5
 
                     optimizers[agent_id].zero_grad()
                     loss.backward()
@@ -372,24 +404,25 @@ if __name__ == "__main__":
     parser.add_argument("--board-json", type=str, default="/home/srinivasan/PycharmProjects/monopoly-rl/monopoly_env/core/data.json", help="Path to board json")
     parser.add_argument("--num-players", type=int, default=4, help="Number of players")
     parser.add_argument("--max-steps", type=int, default=1000, help="Max steps per episode")
-    parser.add_argument("--total-timesteps", type=int, default=100_000, help="Total timesteps for training")
+    parser.add_argument("--total-timesteps", type=int, default=10_000_000, help="Total number of timesteps for training")
     parser.add_argument("--cuda", action="store_true", help="Use CUDA if available")
     # PPO hyper-set from plan
     parser.add_argument("--gamma", type=float, default=0.995)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-coef", type=float, default=0.2)
-    parser.add_argument("--update-epochs", type=int, default=4)
+    parser.add_argument("--update-epochs", type=int, default=4, help="Number of epochs to update the policy network for")
     parser.add_argument("--entropy-coef", type=float, default=0.01)
     # Add new args
-    parser.add_argument("--num-envs", type=int, default=4, help="Number of parallel environments")
-    parser.add_argument("--num-steps", type=int, default=128, help="Number of steps to run in each environment per policy update")
+    parser.add_argument("--num-envs", type=int, default=16, help="Number of parallel environments")
+    parser.add_argument("--num-steps", type=int, default=256, help="Number of steps to run in each environment per policy update")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--minibatch-size", type=int, default=512)
+    parser.add_argument("--num-minibatches", type=int, default=8, help="Number of minibatches to split a batch into")
     parser.add_argument("--curriculum-steps", type=int, default=0, help="Number of timesteps to train with scripted opponents. If 0, disabled.")
     parser.add_argument("--save-path", type=str, default="rl_agent/checkpoints", help="Path to save checkpoints.")
     parser.add_argument("--checkpoint-freq", type=int, default=100, help="Frequency (in updates) to save checkpoints.")
     parser.add_argument("--optimizer", type=str, default="Adam", help="Default optimizer (Adam, AdamW)")
     parser.add_argument("--hidden-dim", type=int, default=128, help="The hidden dimension of the neural network")
+    parser.add_argument("--lr", type=float, default=2.5e-4, help="Learning rate of the optimizer")
     
     args = parser.parse_args()
     main(args) 

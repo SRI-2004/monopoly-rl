@@ -10,6 +10,33 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from monopoly_env.envs.monopoly_env import MonopolyEnv
 from monopoly_env import config
 
+def preprocess_obs(obs, num_players, agent_id_int):
+    """
+    Flattens and preprocesses the observation dictionary from the environment.
+    Crucially, it adds a one-hot vector for the agent's own ID, so a shared
+    policy can distinguish "self" from "other".
+    
+    Returns a NumPy array.
+    """
+    player_obs = obs['player']
+    board_obs = obs['board']
+    trade_details = obs['trade_details']
+    pending_trade = np.array([obs['pending_trade_valid']], dtype=np.float32)
+
+    # One-hot encoding for the agent's own ID
+    agent_id_one_hot = np.zeros(num_players, dtype=np.float32)
+    agent_id_one_hot[agent_id_int] = 1.0
+    
+    flat_obs = np.concatenate([
+        player_obs,
+        board_obs,
+        trade_details,
+        pending_trade,
+        agent_id_one_hot
+    ])
+    
+    return flat_obs
+
 class MonopolyMAv2(ParallelEnv):
     """
     A PettingZoo-style wrapper for the MonopolyEnv.

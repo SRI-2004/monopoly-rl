@@ -7,3 +7,4 @@ runs
 *.pytest_cache
 *.gitignore
 *.cursorignore
+rl_agent/rl_agent
