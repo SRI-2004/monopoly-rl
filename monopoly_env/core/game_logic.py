@@ -204,7 +204,7 @@ class GameLogic:
         elif action == 12:
             return self.respond_to_trade(current_player, sub_action)
         else:
-            raise ValueError("Invalid action index.")
+            raise ValueError(f"Invalid action index: {action}")
 
     def get_valid_actions(self, player):
         """
@@ -794,50 +794,47 @@ class GameLogic:
     # 11. Buy Property
     def buy_property(self, player, sub_action):
         """
-        Purchase an unowned property on which the player just landed.
-
-        The sub_action here is typically a binary flag (e.g., 1 for yes).
+        Allows a player to buy the property they have landed on.
         """
         if not player.can_buy_property():
-            raise Exception("Buying property is not permitted at this time.")
-        if sub_action != 1:
-            return f"{player.player_name} chose not to buy the property."
+            return "You do not have the option to buy a property right now."
 
-        landed_position = player.current_position
-        property_meta = self.board.get_property_meta_by_board_id(landed_position)
+        # The sub_action for buying is simple: 1 for "yes", 0 for "no".
+        if sub_action == 0:
+            player.set_option_to_buy(False) # The player declined.
+            return f"{player.player_name} decided not to buy the property."
 
-        if property_meta is None or not property_meta.get("price"):
-            raise Exception("No purchasable property available at this position.")
+        property_id = player.current_position
+        prop_meta = self.board.get_property_meta_by_board_id(property_id)
+        if not prop_meta:
+            return "Error: Could not find metadata for the current property."
 
-        idx = self.board.property_id_to_index.get(property_meta["id"])
-        if idx is None:
-            raise Exception("Property cannot be bought (not in state vector).")
-            
-        owner_vector = self.board.state[idx, 0:self.board.num_owners]
-        
-        bank_owner_vector = np.zeros(self.board.num_owners)
-        bank_owner_vector[0] = 1
-        if not np.array_equal(owner_vector, bank_owner_vector):
-            raise Exception("Property is already owned.")
+        price = prop_meta.get("price")
+        if price is None:
+            return "Error: This property does not have a price."
 
-        price = property_meta.get("price", 0)
         if player.current_cash < price:
-            raise Exception("Not enough cash to purchase the property.")
+            return f"Not enough cash to buy {prop_meta['name']}."
 
-        self._handle_payment(player, None, price)
-        # Use Board's purchase_property to update ownership.
-        # (Assumes player IDs start at 1; adjust as needed.)
-        self.board.purchase_property(property_meta["id"], self.current_player_index + 1)
-        player.add_asset(property_meta["id"])
+        # Process payment
+        player.subtract_cash(price)
+
+        # Assign property
+        player.add_asset(property_id)
+        prop_idx = self.board.property_id_to_index[property_id]
+        
+        owner_vector = np.zeros(self.board.num_owners, dtype=np.float32)
+        owner_vector[player.player_id + 1] = 1.0 # +1 because bank is owner 0
+        self.board.state[prop_idx, 0:self.board.num_owners] = owner_vector
+
+        # Player bought it, so the option is gone.
         player.set_option_to_buy(False)
-        return f"{player.player_name} purchased {property_meta['name']} for {price}."
+        return f"{player.player_name} bought {prop_meta['name']} for ${price}."
 
     # 12. Respond to Trade
     def respond_to_trade(self, player, sub_action):
         """
-        Respond to a pending trade offer.
-
-        The sub_action is binary: 0 = reject, 1 = accept.
+        Allows a player to respond to a pending trade offer.
         """
         if self.pending_trade is None:
             raise Exception("There is no pending trade offer to respond to.")

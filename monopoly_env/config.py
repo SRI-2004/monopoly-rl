@@ -60,3 +60,6 @@ NUM_EPISODES = 1000
 # - pending_trade_valid: Discrete(2)
 # - trade_details: Box(4,)
 TRADE_DETAILS_DIM = 4
+
+
+REWARD_CONFIG_PATH = "/home/srinivasan/PycharmProjects/monopoly-rl/monopoly_env/utils/reward_config.json"   

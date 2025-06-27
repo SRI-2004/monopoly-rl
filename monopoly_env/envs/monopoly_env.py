@@ -1,6 +1,8 @@
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+import json
+import os
 
 from monopoly_env.core import initialize_game
 from monopoly_env.utils.reward_calculator import RewardCalculator
@@ -38,7 +40,7 @@ class MonopolyEnv(gym.Env):
 
     metadata = {"render.modes": ["human"]}
 
-    def __init__(self, board_json_path=config.DEFAULT_BOARD_JSON, num_players=config.NUM_PLAYERS, max_steps=config.MAX_STEPS, player_names=config.PLAYER_NAMES):
+    def __init__(self, board_json_path=config.DEFAULT_BOARD_JSON, num_players=config.NUM_PLAYERS, max_steps=config.MAX_STEPS, player_names=config.PLAYER_NAMES, reward_config_path=config.REWARD_CONFIG_PATH):
         super(MonopolyEnv, self).__init__()
 
         # Set default player names if none are provided.
@@ -72,12 +74,15 @@ class MonopolyEnv(gym.Env):
 
         # Ensure game logic's current player index is set to 0.
         self.game.current_player_index = 0
+        
+        # Load the new reward configuration
+        with open(reward_config_path) as f:
+            reward_config = json.load(f)
+
         self.reward_calculator = RewardCalculator(
             self.game.board, 
             self.game.players,
-            cash_threshold=config.CASH_THRESHOLD,
-            penalty_beta=config.PENALTY_BETA,
-            win_bonus=config.WIN_BONUS
+            config=reward_config
         )
 
         # Reset the environment to start a new game.
@@ -177,6 +182,9 @@ class MonopolyEnv(gym.Env):
         # Adjust the top-level action to match game_logic expectations (1-indexed).
         adjusted_action = top_level_action + 1
 
+        # Get state before action to calculate houses built
+        old_house_frac_sum = np.sum(self.game.board.state[:, 6])
+
         try:
             # Process the action using the game logic.
             result_msg = self.game.process_action(adjusted_action, sub_action)
@@ -190,25 +198,55 @@ class MonopolyEnv(gym.Env):
             info = {"error": str(e)}
             return self._get_obs(), reward, terminated, truncated, info
 
-        # Compute dense reward for the current player.
-        dense_reward = self.reward_calculator.compute_dense_reward(current_player)
+        # --- New Reward Calculation Logic ---
+        # Calculate houses built by comparing board state
+        new_house_frac_sum = np.sum(self.game.board.state[:, 6])
+        houses_built = int(round((new_house_frac_sum - old_house_frac_sum) / 0.25))
 
-        # Determine if the episode is finished.
+        # Create action_info dict for the reward calculator
+        action_info = {
+            'purchased_property': adjusted_action == 2, # Assuming action 2 is "purchase"
+            'houses_built': houses_built,
+            'paid_jail_fine': adjusted_action == 6, # Assuming action 6 is "pay jail fine"
+        }
+
+        # Compute dense reward for the current player using the new logic
+        dense_reward = self.reward_calculator.compute_dense_reward(current_player, action_info)
+
+        # Determine if the episode is finished naturally
         terminated = any(p.status == "won" for p in self.players)
-
-        # Check if max steps reached (we mark as truncated if so).
         truncated = False
-        if self.current_step >= self.max_steps:
-            truncated = True
-            terminated = True
 
-        # If the episode is done, compute the sparse (terminal) reward.
+        # Handle truncation tie-breaker
+        if not terminated and self.current_step >= self.max_steps:
+            truncated = True
+            terminated = True # In Gym, truncation also signals the end of an episode
+            
+            # Find winner by net worth
+            net_worths = {p.player_name: self.reward_calculator.compute_networth(p) for p in self.players}
+            if net_worths:
+                winner_name = max(net_worths, key=net_worths.get)
+                for p in self.players:
+                    if p.player_name == winner_name:
+                        p.status = "won" # Set winner status for sparse reward calculation
+        
+        # If the episode is done (by win or truncation), compute the sparse (terminal) reward.
         sparse_reward = self.reward_calculator.compute_sparse_reward(current_player) if terminated else 0.0
 
-        # Combined reward is the sum of the dense and sparse rewards plus a valid action bonus.
-        reward = dense_reward + sparse_reward + 1.0  # +1 bonus for taking a valid action.
+        # The final reward for this step
+        reward = dense_reward + sparse_reward
 
-        info = {"result": result_msg, "step": self.current_step}
+        # The info dict should contain all relevant data for analytics
+        net_worths_for_info = {p.player_name: self.reward_calculator.compute_networth(p) for p in self.players}
+        info = {
+            "result": result_msg, 
+            "step": self.current_step,
+            "behavioral_metrics": self.reward_calculator.get_and_reset_behavioral_metrics(),
+            "net_worths": net_worths_for_info,
+            "status": current_player.status,
+            'semantic_features': {p.player_name: {'net_worth': w} for p, w in zip(self.players, net_worths_for_info.values())}
+        }
+        
         return self._get_obs(), reward, terminated, truncated, info
 
     def _get_obs(self):

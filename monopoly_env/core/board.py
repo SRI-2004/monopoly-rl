@@ -28,10 +28,15 @@ class Board:
         self.json_filepath = json_filepath
         self.board_layout = self._load_board_layout(json_filepath)
         self.board_map = {space['id']: space for space in self.board_layout}
+        self.board_meta = {str(space['id']): space for space in self.board_layout}
         
         # Filter the full layout to get just the buyable properties for the state vector
         self.properties_meta = [p for p in self.board_layout if p.get("price")]
         
+        # Create mappings for quick lookups, essential for the new reward calculator
+        self.properties_meta_by_id = {p['id']: p for p in self.properties_meta}
+        self.property_id_to_state_idx = {prop["id"]: i for i, prop in enumerate(self.properties_meta)}
+
         # Create a mapping from property ID to its index in our state array (of 28 properties)
         self.property_id_to_index = {prop["id"]: i for i, prop in enumerate(self.properties_meta)}
         self.num_properties = len(self.properties_meta)
@@ -255,5 +260,9 @@ class Board:
         else:
             for idx in indices:
                 self.state[idx, 5] = 0
+
+    def get_board_meta(self):
+        """Returns the full board metadata dictionary."""
+        return self.board_meta
 
 

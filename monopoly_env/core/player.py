@@ -69,6 +69,28 @@ class Player:
             raise ValueError(f"Invalid phase provided. Valid phases: {Player.PHASES}")
         self.phase = phase
 
+    def get_net_worth(self, board_meta: dict) -> int:
+        """
+        Calculates the player's total net worth.
+        Net Worth = Current Cash + Value of Unmortgaged Properties + Value of Mortgaged Properties (at 50%)
+        """
+        net_worth = self.current_cash
+        
+        for asset_id in self.assets:
+            property_meta = board_meta.get(str(asset_id))
+            if property_meta:
+                price = property_meta.get('price', 0)
+                if asset_id in self.mortgaged_assets:
+                    net_worth += price // 2  # Mortgaged assets are worth 50%
+                else:
+                    net_worth += price
+                    # Add value of houses/hotels
+                    num_houses = property_meta.get('num_houses', 0)
+                    house_cost = property_meta.get('house_cost', 0)
+                    net_worth += num_houses * house_cost
+
+        return net_worth
+
     # --- Movement and Cash Management ---
     def move(self, new_position: int):
         """
