@@ -1,0 +1,47 @@
+{
+    "global": {
+      "optimizer": "AdamW",
+      "lr": 0.00025,
+      "num_players": 4,
+      "max_steps": 1000,
+      "total_timesteps": 15000000,
+      "cuda": true,
+      "gamma": 0.997,
+      "gae_lambda": 0.95,
+      "clip_coef": 0.15,
+      "update_epochs": 6,
+      "entropy_coef": 0.008,
+      "vf_coef": 0.5,
+      "num_envs": 16,
+      "num_steps": 512,
+      "minibatch_size": 4096,
+      "seed": 42,
+      "hidden_dim": 256,
+      "hidden_layers": 2,
+      "activation": "tanh",
+      "orthogonal_init": true,
+      "layer_norm": true
+    },
+    "per_agent": {
+      "player_0": {
+        "lr": 0.0003,
+        "entropy_coef": 0.02,
+        "clip_coef": 0.25
+      },
+      "player_1": {
+        "lr": 0.00025
+      },
+      "player_2": {
+        "lr": 0.00015,
+        "entropy_coef": 0.005,
+        "gamma": 0.999,
+        "gae_lambda": 0.97
+      },
+      "player_3": {
+        "lr": 0.0004,
+        "clip_coef": 0.1,
+        "update_epochs": 4
+      }
+    }
+  }
+  
