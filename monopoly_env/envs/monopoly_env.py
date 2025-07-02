@@ -175,8 +175,17 @@ class MonopolyEnv(gym.Env):
         actions_with_sub = {0, 1, 2, 3, 4, 5, 10, 11}
         if top_level_action in actions_with_sub:
             valid_sub_mask = self.game.get_valid_subactions(current_player, top_level_action)
+
+            # --- Hotfix for "Buy Property" (action 10) ---
+            # The agent's sub-action space (252) is too large compared to the valid
+            # sub-actions for buying (0=No, 1=Yes). This makes exploration prohibitively
+            # difficult. We'll interpret any non-zero sub-action as "Yes" to facilitate learning.
+            if top_level_action == 10: # If the action is "Buy Property"
+                if sub_action != 0:
+                    sub_action = 1 # Force sub_action to 1 (Yes)
+
             if sub_action < 0 or sub_action >= len(valid_sub_mask) or not valid_sub_mask[sub_action]:
-                info = {"error": "Invalid sub-action selected according to valid sub-actions mask."}
+                info = {"error": f"Invalid sub-action {sub_action} for top action {top_level_action}."}
                 return self._get_obs(), -1.0, False, False, info
 
         # Adjust the top-level action to match game_logic expectations (1-indexed).

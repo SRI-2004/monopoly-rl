@@ -135,7 +135,7 @@ class RewardCalculator:
                     owner_ids.add(owner_id)
                 
                 # Check if the set has one unique owner and that owner is the current player
-                if is_monopoly_candidate and len(owner_ids) == 1 and player.player_id in owner_ids:
+                if is_monopoly_candidate and len(owner_ids) == 1 and (player.player_id + 1) in owner_ids:
                     value *= 2
                 networth += value
 
@@ -178,6 +178,14 @@ class RewardCalculator:
         if houses_built > 0:
             self.behavioral_metrics['houses_built'] += houses_built
 
+        # --- New: Monopoly Completion Bonus ---
+        # Detect if a new monopoly was formed this step
+        monopoly_bonus = 0
+        num_current_monopolies = len(current_player.full_color_sets_possessed)
+        num_prev_monopolies = self.prev_networth.get(f"{current_player.player_name}_monopolies", 0)
+        if num_current_monopolies > num_prev_monopolies:
+            monopoly_bonus = self.config.get('monopoly_bonus', 0.5) # Default to 0.5 if not in config
+
         # Track jail fines paid for analytics
         if action_info.get('paid_jail_fine', False):
             self.behavioral_metrics['jail_fines_paid'] += 1
@@ -185,10 +193,12 @@ class RewardCalculator:
         # 5. Time penalty (now using normalized value)
         time_penalty = self.time_penalty_per_step
 
-        # Update previous net worth for the next step.
+        # Update previous net worth and monopoly count for the next step.
         self.prev_networth = current_networth
+        for p in self.players:
+            self.prev_networth[f"{p.player_name}_monopolies"] = len(p.full_color_sets_possessed)
 
-        return networth_ratio_term + log_growth_term + buy_bonus + build_bonus - time_penalty
+        return networth_ratio_term + log_growth_term + buy_bonus + build_bonus + monopoly_bonus - time_penalty
 
     def compute_sparse_reward(self, current_player):
         """

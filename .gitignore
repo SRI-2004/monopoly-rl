@@ -4,3 +4,4 @@
 runs
 *.zip
 rl_agent/rl_agent
+*.pt

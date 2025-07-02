@@ -1,6 +1,6 @@
 import multiprocessing as mp
 import numpy as np
-from rl_agent.env_wrapper import preprocess_obs # Import the preprocessing function
+from env_wrapper import preprocess_obs # Import the preprocessing function
 
 def worker(remote, parent_remote, env_fn, seed):
     """

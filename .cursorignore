@@ -8,3 +8,4 @@ runs
 *.gitignore
 *.cursorignore
 rl_agent/rl_agent
+*.pt

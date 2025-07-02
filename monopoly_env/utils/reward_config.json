@@ -1,14 +1,15 @@
 {
-  "gamma": 0.997,
-  "cash_threshold": 200,
-  "cash_penalty_beta": 1.0,
-  "house_contribution_factor": 0.5,
-  "hotel_contribution_factor": 1.0,
-  "avg_dice_roll": 7.0,
-  "buy_bonus": 3.0,
-  "build_bonus_per_house": 1.0,
-  "time_penalty": 0.01,
-  "win_bonus": 1000.0,
-  "log_growth_clip": 5.0,
-  "ratio_clip": 10.0
+  "gamma": 0.995,
+  "cash_threshold": 500,
+  "cash_penalty_beta": 0.002,
+  "house_contribution_factor": 0.1,
+  "hotel_contribution_factor": 0.1,
+  "avg_dice_roll": 7,
+  "buy_bonus": 0.05,
+  "build_bonus_per_house": 0.1,
+  "time_penalty": -0.001,
+  "win_bonus": 10.0,
+  "log_growth_clip": 2.0,
+  "ratio_clip": 5.0,
+  "monopoly_bonus": 0.5
 } 
