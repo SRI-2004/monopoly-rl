@@ -106,17 +106,9 @@ def run_evaluation_parallel(args, agents, device):
         if loop_counter % 500 == 0:
             print(f"  [Progress Update] Simulation has run for {loop_counter} parallel steps. Games finished so far: {games_played}/{args.num_games}")
 
-        # --- MODIFICATION: Implement two-step action for pre-roll and post-roll ---
+        # --- MODIFICATION: Single-step action for parallel evaluation ---
+        # The two-phase system is handled internally by the environment
         
-        # 1. Pre-roll step: Always attempt to "conclude" to roll the dice.
-        # The environment's internal logic will only accept this if the agent is in the 'pre-roll' phase.
-        pre_roll_action = np.array([[7, 0]] * args.num_envs) # Action 7 is "conclude"
-        pre_roll_action_dict = {agent_id: pre_roll_action for agent_id in agent_ids}
-        
-        # We only need the next observation from this step. Rewards/dones are handled in the main step.
-        obs, _, _, _, _ = envs.step(pre_roll_action_dict)
-
-        # 2. Post-roll step: Get the actual action from the policy using the new observation.
         action_dict = {}
         with torch.no_grad():
             for i, agent_id in enumerate(agent_ids):
@@ -124,9 +116,10 @@ def run_evaluation_parallel(args, agents, device):
                 # The observation from the parallel env is now pre-processed.
                 agent_obs = torch.tensor(obs[:, i, :], dtype=torch.float32, device=device)
                 
-                top_logits, sub_logits, _, hx[agent_id] = agent(agent_obs, hx[agent_id])
-                top_action = torch.argmax(top_logits, dim=1)
-                sub_action = torch.argmax(sub_logits, dim=1)
+                # Use new hierarchical action sampling for better context awareness
+                top_action, sub_action, _, _, _, hx[agent_id] = agent.get_action_and_value(
+                    agent_obs, hx[agent_id], deterministic=True  # Use deterministic for evaluation
+                )
                 action_dict[agent_id] = torch.stack([top_action, sub_action], dim=1).cpu().numpy()
 
         obs, rewards, terminated, truncated, infos = envs.step(action_dict)
@@ -168,23 +161,34 @@ def run_evaluation_parallel(args, agents, device):
                 for agent_id in agent_ids:
                     # Extract this agent's specific data
                     agent_final_info = final_info.get(agent_id, {})
-                    behavior_metrics = agent_final_info.get('behavioral_metrics', {})
                     
                     # Net Worth and core stats
                     final_net_worth = semantic_features.get(agent_id, {}).get('net_worth', 0)
                     final_net_worths_dict[agent_id] = final_net_worth
                     final_stats[agent_id]["total_rewards"].append(in_progress_stats[i]["rewards"][agent_id])
                     final_stats[agent_id]["final_net_worths"].append(final_net_worth)
-                    
-                    # Behavioral stats (now correctly sourced per-agent)
-                    final_stats[agent_id]["properties_purchased"] += behavior_metrics.get("properties_purchased", 0)
-                    final_stats[agent_id]["houses_built"] += behavior_metrics.get("houses_built", 0)
-                    final_stats[agent_id]["jail_fines_paid"] += behavior_metrics.get("jail_fines_paid", 0)
 
                     # Check for a natural winner
                     if agent_final_info.get('status') == 'won':
                         winner_id = agent_id
                 
+                # Get behavioral metrics from the final info (should be in the first agent's info)
+                first_agent_final_info = final_info.get(agent_ids[0], {})
+                all_behavioral_metrics = first_agent_final_info.get('all_behavioral_metrics', {})
+                
+                # Add behavioral stats for each player
+                for agent_id in agent_ids:
+                    # Map agent_id to player name - use actual player names from the environment
+                    player_idx = int(agent_id.split('_')[-1])
+                    player_names = ["Alice", "Bob", "Charlie", "Diana"]  # These are the actual player names
+                    if player_idx < len(player_names):
+                        player_name = player_names[player_idx]
+                        player_metrics = all_behavioral_metrics.get(player_name, {})
+                        
+                        final_stats[agent_id]["properties_purchased"] += player_metrics.get("properties_purchased", 0)
+                        final_stats[agent_id]["houses_built"] += player_metrics.get("houses_built", 0)
+                        final_stats[agent_id]["jail_fines_paid"] += player_metrics.get("jail_fines_paid", 0)
+
                 # If no natural winner, it was a truncation; award win to player with highest net worth.
                 if winner_id is None and final_net_worths_dict:
                     # Ensure there are actually values to compare
@@ -227,6 +231,18 @@ def run_evaluation_sequential(args, agents, device):
 
     win_counts = {agent_id: 0 for agent_id in agent_ids}
     
+    # Add behavioral analytics tracking
+    final_stats = {}
+    for agent_id in agent_ids:
+        final_stats[agent_id] = {
+            "total_rewards": [],
+            "final_net_worths": [],
+            "wins": 0,
+            "properties_purchased": 0,
+            "houses_built": 0,
+            "jail_fines_paid": 0,
+        }
+    
     pbar = tqdm(total=args.num_games, desc="Evaluating Games (Sequential)")
     for game in range(args.num_games):
         obs, _ = env.reset(seed=args.seed + game)
@@ -234,61 +250,99 @@ def run_evaluation_sequential(args, agents, device):
             agent_id: torch.zeros(1, 1, agent.hidden_dim).to(device) for agent_id, agent in agents.items() if isinstance(agent, ActorCritic)
         }
         
+        # Track per-game stats
+        game_rewards = {agent_id: 0.0 for agent_id in agent_ids}
+        
         while True:
-            current_agent_id = env.agent_selection
-            agent = agents[current_agent_id]
-            agent_obs = obs[current_agent_id]
+            # Get the current player and check their phase
+            current_agent_idx = env.internal_env.game.current_player_index
+            current_agent_id = f"player_{current_agent_idx}"
+            current_player = env.internal_env.game.players[current_agent_idx]
             
-            # --- MODIFICATION: Handle pre-roll and post-roll phases ---
-            is_neural_agent = not isinstance(agent, ScriptedAgent)
-            player_phase = env.game.players[int(current_agent_id.split('_')[-1])].phase
-
-            # If it's a neural agent in the pre-roll phase, it MUST roll the dice.
-            # The "conclude" action (index 7) is what triggers the dice roll.
-            if is_neural_agent and player_phase == 'pre-roll':
-                action = (7, 0) # Action 7 is "conclude" -> roll dice
-                obs, rewards, terminated, truncated, info = env.step(action)
-
-                # After rolling, the agent might have won/lost immediately (e.g. from a card)
+            # --- MODIFICATION: Implement two-step action for pre-roll and post-roll ---
+            
+            # 1. Pre-roll step: Always attempt to "conclude" to roll the dice if in pre-roll phase
+            if current_player.phase == 'pre-roll':
+                pre_roll_action = (7, 0)  # Action 7 is "conclude"
+                pre_roll_action_dict = {current_agent_id: pre_roll_action}
+                
+                # Execute the pre-roll action
+                obs, rewards, terminated, truncated, info = env.step(pre_roll_action_dict)
+                
+                # Track rewards from pre-roll
+                for aid in agent_ids:
+                    game_rewards[aid] += rewards.get(aid, 0.0)
+                
+                # Check if game ended during pre-roll
                 if terminated[current_agent_id] or truncated[current_agent_id]:
-                    # Game is over, find the winner from the environment's perspective
-                    for ag_id in agent_ids:
-                        # PettingZoo's env.rewards is a cumulative dict. The winner is the one with a positive final reward.
-                        # This is a simplification; a more robust method would be to check agent status.
-                        if env.game.players[int(ag_id.split('_')[-1])].status == 'won':
-                             win_counts[ag_id] += 1
-                             break
-                    break # End this game loop
-
-                # The active agent hasn't changed, but we need the new observation for the post-roll action
-                agent_obs = obs[current_agent_id]
-
-            # Now, in the post-roll phase (or if it's a scripted agent), decide the actual move.
-            with torch.no_grad():
-                if isinstance(agent, ScriptedAgent):
-                    action = agent.get_action(agent_obs)
-                else: # Neural agent in post-roll
-                    processed_obs_np = preprocess_obs(agent_obs, num_agents, int(current_agent_id.split('_')[-1]))
-                    processed_obs = torch.tensor(processed_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
-                    top_logits, sub_logits, _, hx[current_agent_id] = agent(processed_obs, hx[current_agent_id])
-                    top_action = torch.argmax(top_logits, dim=1)
-                    sub_action = torch.argmax(sub_logits, dim=1)
-                    action = (top_action.item(), sub_action.item())
+                    break
+                
+                # Update current player info after pre-roll
+                current_agent_idx = env.internal_env.game.current_player_index
+                current_agent_id = f"player_{current_agent_idx}"
+                current_player = env.internal_env.game.players[current_agent_idx]
             
-            obs, rewards, terminated, truncated, info = env.step(action)
+            # 2. Post-roll step: Get the actual action from the agent
+            # Get action from the appropriate agent
+            agent = agents[current_agent_id]
+            if isinstance(agent, ScriptedAgent):
+                # Scripted agent
+                action = agent.get_action(obs[current_agent_id])
+            else:
+                # Neural network agent
+                # Preprocess the observation for neural agents
+                processed_obs_np = preprocess_obs(obs[current_agent_id], num_agents, int(current_agent_id.split('_')[-1]))
+                agent_obs = torch.tensor(processed_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
+                
+                # Use new hierarchical action sampling for better context awareness
+                top_action, sub_action, _, _, _, hx[current_agent_id] = agent.get_action_and_value(
+                    agent_obs, hx[current_agent_id], deterministic=True
+                )
+                
+                action = (top_action.item(), sub_action.item())
+                
+            # Step environment with the post-roll action
+            action_dict = {current_agent_id: action}
+            obs, rewards, terminated, truncated, info = env.step(action_dict)
+            
+            # Track rewards from post-roll
+            for aid in agent_ids:
+                game_rewards[aid] += rewards.get(aid, 0.0)
             
             if terminated[current_agent_id] or truncated[current_agent_id]:
-                # Game is over, find the winner
+                # Game is over, find the winner and collect final stats
                 for agent_id in agent_ids:
-                    if env.game.players[int(agent_id.split('_')[-1])].status == 'won':
+                    player = env.internal_env.game.players[int(agent_id.split('_')[-1])]
+                    if player.status == 'won':
                         win_counts[agent_id] += 1
-                        break
+                        final_stats[agent_id]["wins"] += 1
+                    
+                    # Collect final stats
+                    final_stats[agent_id]["total_rewards"].append(game_rewards[agent_id])
+                    final_stats[agent_id]["final_net_worths"].append(player.get_net_worth(env.internal_env.game.board.get_board_meta()))
+                
+                # Get final behavioral metrics from the info if available
+                if current_agent_id in info and 'all_behavioral_metrics' in info[current_agent_id]:
+                    all_metrics = info[current_agent_id]["all_behavioral_metrics"]
+                    for agent_id in agent_ids:
+                        player_idx = int(agent_id.split('_')[-1])
+                        player_names = ["Alice", "Bob", "Charlie", "Diana"]  # Actual player names
+                        if player_idx < len(player_names):
+                            player_name = player_names[player_idx]
+                            player_metrics = all_metrics.get(player_name, {})
+                            final_stats[agent_id]["properties_purchased"] += player_metrics.get("properties_purchased", 0)
+                            final_stats[agent_id]["houses_built"] += player_metrics.get("houses_built", 0)
+                            final_stats[agent_id]["jail_fines_paid"] += player_metrics.get("jail_fines_paid", 0)
+                else:
+                    if current_agent_id in info:
+                        if 'error' in info[current_agent_id]:
+                            print(f"DEBUG: Error: {info[current_agent_id]['error']}")
                 break
         pbar.update(1)
 
     pbar.close()
     env.close()
-    return win_counts, args.num_games
+    return final_stats, args.num_games
 
 
 def main(args):
@@ -322,7 +376,7 @@ def main(args):
         if i < len(ckpt_paths) and ckpt_paths[i]:
             if ckpt_paths[i].lower() == 'scripted':
                 print(f"Loading ScriptedAgent for {agent_id}")
-                agents[agent_id] = ScriptedAgent(agent_id.split('_')[-1], num_agents, board_meta)
+                agents[agent_id] = ScriptedAgent(int(agent_id.split('_')[-1]), num_agents, board_meta)
                 is_scripted_present = True
             else:
                 print(f"Loading policy for {agent_id} from {ckpt_paths[i]}")
@@ -333,16 +387,14 @@ def main(args):
                 agents[agent_id] = policy
         else:
             print(f"Defaulting to ScriptedAgent for {agent_id}")
-            agents[agent_id] = ScriptedAgent(agent_id.split('_')[-1], num_agents, board_meta)
+            agents[agent_id] = ScriptedAgent(int(agent_id.split('_')[-1]), num_agents, board_meta)
             is_scripted_present = True
 
     # 3. Run Evaluation
     if is_scripted_present:
         # Note: Detailed stats are not implemented for sequential mode yet.
         # This is a limitation for evaluating against scripted agents.
-        win_counts, games_played = run_evaluation_sequential(args, agents, device)
-        # Create a mock final_stats for basic win rate reporting
-        final_stats = {agent_id: {"wins": wins} for agent_id, wins in win_counts.items()}
+        final_stats, games_played = run_evaluation_sequential(args, agents, device)
     else:
         final_stats, games_played = run_evaluation_parallel(args, agents, device)
 
@@ -378,6 +430,47 @@ def main(args):
         print(f"    - Jail Fines Paid: {stats.get('jail_fines_paid', 0)}")
 
     print("------------------------\n")
+    
+    # Save results to JSON file if output file is specified
+    if args.output_file:
+        # Create output directory if it doesn't exist
+        output_dir = os.path.dirname(args.output_file)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        # Prepare results dictionary
+        results = {
+            "evaluation_summary": {
+                "total_games": games_played,
+                "average_game_length": avg_game_length,
+                "average_bankruptcy_margin": avg_bankruptcy_margin
+            },
+            "agent_performance": {}
+        }
+        
+        # Add per-agent results
+        for agent_id in agents.keys():
+            stats = final_stats.get(agent_id, {})
+            wins = stats.get("wins", 0)
+            win_rate = (wins / games_played) * 100 if games_played > 0 else 0
+            mean_reward = np.mean(stats.get("total_rewards", [0]))
+            mean_net_worth = np.mean(stats.get("final_net_worths", [0]))
+            
+            results["agent_performance"][agent_id] = {
+                "wins": wins,
+                "win_rate": win_rate,
+                "average_reward": mean_reward,
+                "average_final_net_worth": mean_net_worth,
+                "properties_purchased": stats.get("properties_purchased", 0),
+                "houses_built": stats.get("houses_built", 0),
+                "jail_fines_paid": stats.get("jail_fines_paid", 0)
+            }
+        
+        # Save to JSON file
+        with open(args.output_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        
+        print(f"Results saved to: {args.output_file}")
 
 
 if __name__ == "__main__":
@@ -388,11 +481,37 @@ if __name__ == "__main__":
     parser.add_argument("--p1-ckpt", type=str, default="scripted", help="Path to checkpoint for player 1, or 'scripted'")
     parser.add_argument("--p2-ckpt", type=str, default="scripted", help="Path to checkpoint for player 2, or 'scripted'")
     parser.add_argument("--p3-ckpt", type=str, default="scripted", help="Path to checkpoint for player 3, or 'scripted'")
+    parser.add_argument("--checkpoint-dir", type=str, help="Directory containing checkpoints (alternative to individual --p*-ckpt args)")
     parser.add_argument("--board-json", type=str, default="/home/srinivasan/PycharmProjects/monopoly-rl/monopoly_env/core/data.json", help="Path to board json")
     parser.add_argument("--num-players", type=int, default=4, help="Number of players")
     parser.add_argument("--max-steps", type=int, default=10000, help="Max steps per episode")
     parser.add_argument("--seed", type=int, default=101, help="Random seed for evaluation")
     parser.add_argument("--cuda", action="store_true", help="Use CUDA if available")
+    parser.add_argument("--output-file", type=str, help="Path to save evaluation results JSON")
     
     args = parser.parse_args()
+    
+    # If checkpoint-dir is provided, find the latest checkpoint and use it for all players
+    if args.checkpoint_dir:
+        import os
+        import glob
+        
+        # Find the latest checkpoint file in the directory
+        ckpt_pattern = os.path.join(args.checkpoint_dir, "*.pt")
+        ckpt_files = glob.glob(ckpt_pattern)
+        
+        if ckpt_files:
+            # Sort by modification time and get the latest
+            latest_ckpt = max(ckpt_files, key=os.path.getmtime)
+            print(f"Using latest checkpoint: {latest_ckpt}")
+            
+            # Use the latest checkpoint for all players
+            args.p0_ckpt = latest_ckpt
+            args.p1_ckpt = latest_ckpt
+            args.p2_ckpt = latest_ckpt
+            args.p3_ckpt = latest_ckpt
+        else:
+            print(f"No checkpoint files found in {args.checkpoint_dir}")
+            print("Using scripted agents instead")
+    
     main(args) 

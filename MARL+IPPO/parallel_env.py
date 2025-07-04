@@ -85,6 +85,9 @@ class MultiProcessingVecEnv:
         actions_per_env = [{} for _ in range(self.num_envs)]
         for agent_id, agent_actions in actions.items():
             for i, action in enumerate(agent_actions):
+                # Fix: Convert numpy array action to tuple format expected by environment
+                if isinstance(action, np.ndarray):
+                    action = tuple(action.tolist())
                 actions_per_env[i][agent_id] = action
 
         for remote, action_dict in zip(self.remotes, actions_per_env):
