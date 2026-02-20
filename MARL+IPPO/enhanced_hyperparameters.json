@@ -12,7 +12,7 @@
       "update_epochs": 8,
       "entropy_coef": 0.01,
       "vf_coef": 0.5,
-      "num_envs": 32,
+      "num_envs": 24,
       "num_steps": 512,
       "minibatch_size": 4096,
       "seed": 42,

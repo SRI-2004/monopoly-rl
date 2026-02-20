@@ -294,9 +294,10 @@ def run_evaluation_sequential(args, agents, device):
                 processed_obs_np = preprocess_obs(obs[current_agent_id], num_agents, int(current_agent_id.split('_')[-1]))
                 agent_obs = torch.tensor(processed_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
                 
-                # Use new hierarchical action sampling for better context awareness
+                # Use new hierarchical action sampling with action masking for better context awareness
+                action_mask = obs[current_agent_id].get('action_mask', None)
                 top_action, sub_action, _, _, _, hx[current_agent_id] = agent.get_action_and_value(
-                    agent_obs, hx[current_agent_id], deterministic=True
+                    agent_obs, hx[current_agent_id], deterministic=True, action_mask=action_mask
                 )
                 
                 action = (top_action.item(), sub_action.item())

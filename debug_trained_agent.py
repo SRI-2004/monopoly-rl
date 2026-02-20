@@ -1,9 +1,5 @@
 import torch
 import numpy as np
-import sys
-import os
-# Add the parent directory to the path to import from MARL+IPPO
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from env_wrapper import MonopolyMAv2, preprocess_obs
 from network import ActorCritic
 from scripted_agent import ScriptedAgent
@@ -35,7 +31,7 @@ def debug_trained_agent():
     device = torch.device("cpu")
     
     # Load the trained agent
-    ckpt_path = "/home/srinivasan/PycharmProjects/monopoly-rl/MARL+IPPO/rl_agent/checkpoints/enhanced_training/policy_player_0_update_2000.pt"  
+    ckpt_path = "/home/srinivasan/PycharmProjects/monopoly-rl/MARL+IPPO/rl_agent/checkpoints/enhanced_training/Monopoly_IPPO_1751640470/policy_player_3_update_1400.pt"
     board_json = "/home/srinivasan/PycharmProjects/monopoly-rl/monopoly_env/core/data.json"
     
     # Create environment
@@ -82,28 +78,18 @@ def debug_trained_agent():
         
         print(f"\nStep {step + 1}: Current player: {current_agent_id}")
         print(f"Player phase: {current_player.phase}")
-        print(f"Player position: {current_player.current_position}")
-        print(f"Player cash: {current_player.current_cash}")
+        print(f"Player position: {current_player.position}")
+        print(f"Player cash: {current_player.cash}")
         
         # Get current observation
         current_obs = obs[current_agent_id]
         
         # Check valid actions
         valid_actions = current_obs.get('action_mask', [])
-        print(f"Action mask type: {type(valid_actions)}")
-        print(f"Action mask length: {len(valid_actions) if hasattr(valid_actions, '__len__') else 'N/A'}")
-        
-        if isinstance(valid_actions, list) and len(valid_actions) >= 2:
+        if len(valid_actions) >= 2:
             valid_top_actions = [i for i, mask in enumerate(valid_actions[0]) if mask]
             print(f"Valid top actions: {valid_top_actions}")
             print(f"Action mask shape: {[len(mask) for mask in valid_actions]}")
-        elif isinstance(valid_actions, np.ndarray):
-            print(f"Action mask shape: {valid_actions.shape}")
-            if valid_actions.ndim == 2:
-                valid_top_actions = [i for i, mask in enumerate(valid_actions[0]) if mask]
-                print(f"Valid top actions: {valid_top_actions}")
-        else:
-            print(f"Unexpected action mask format: {valid_actions}")
         
         if current_agent_id == "player_0":
             # This is our trained agent
@@ -112,11 +98,10 @@ def debug_trained_agent():
             
             print(f"Processed obs shape: {agent_obs.shape}")
             
-            # Get action from trained agent with action masking
-            action_mask = current_obs.get('action_mask', None)
+            # Get action from trained agent
             with torch.no_grad():
                 top_action, sub_action, _, _, _, hx = trained_agent.get_action_and_value(
-                    agent_obs, hx, deterministic=True, action_mask=action_mask
+                    agent_obs, hx, deterministic=True
                 )
                 
             top_action_val = top_action.item()
@@ -125,32 +110,17 @@ def debug_trained_agent():
             print(f"Trained agent selected: top_action={top_action_val}, sub_action={sub_action_val}")
             
             # Check if this action is valid
-            if isinstance(valid_actions, list) and len(valid_actions) >= 2:
-                top_action_mask = valid_actions[0]
-                sub_action_masks = valid_actions[1]
+            if len(valid_actions) >= 2 and len(valid_actions[0]) > top_action_val:
+                is_valid_top = valid_actions[0][top_action_val]
+                print(f"Is top action valid? {is_valid_top}")
                 
-                if top_action_val < len(top_action_mask):
-                    is_valid_top = top_action_mask[top_action_val]
-                    print(f"Is top action valid? {is_valid_top}")
-                    
-                    if is_valid_top and top_action_val < len(sub_action_masks):
-                        sub_action_mask = sub_action_masks[top_action_val]
-                        if sub_action_val < len(sub_action_mask):
-                            is_valid_sub = sub_action_mask[sub_action_val]
-                            print(f"Is sub action valid? {is_valid_sub}")
-                            
-                            # Debug sub-action mask for Buy Property (action 10)
-                            if top_action_val == 10:
-                                valid_sub_actions = [i for i, valid in enumerate(sub_action_mask) if valid]
-                                print(f"Valid sub-actions for Buy Property: {valid_sub_actions}")
-                        else:
-                            print(f"Sub action {sub_action_val} out of range for mask length {len(sub_action_mask)}")
-                    else:
-                        print(f"Top action invalid or sub-action mask missing")
+                if is_valid_top and len(valid_actions[1]) > sub_action_val:
+                    is_valid_sub = valid_actions[1][sub_action_val]
+                    print(f"Is sub action valid? {is_valid_sub}")
                 else:
-                    print(f"Top action {top_action_val} out of range for mask length {len(top_action_mask)}")
+                    print(f"Sub action out of range or top action invalid")
             else:
-                print("Action mask format issue or insufficient length")
+                print("Action mask format issue or top action out of range")
                 
             action = (top_action_val, sub_action_val)
         else:

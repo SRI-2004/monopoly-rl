@@ -1,0 +1,45 @@
+{
+  "evaluation_summary": {
+    "total_games": 50,
+    "average_game_length": 3000.0,
+    "average_bankruptcy_margin": 0.0
+  },
+  "agent_performance": {
+    "player_0": {
+      "wins": 50,
+      "win_rate": 100.0,
+      "average_reward": -3000.0,
+      "average_final_net_worth": 1500.0,
+      "properties_purchased": 0,
+      "houses_built": 0,
+      "jail_fines_paid": 0
+    },
+    "player_1": {
+      "wins": 0,
+      "win_rate": 0.0,
+      "average_reward": 0.0,
+      "average_final_net_worth": 1500.0,
+      "properties_purchased": 0,
+      "houses_built": 0,
+      "jail_fines_paid": 0
+    },
+    "player_2": {
+      "wins": 0,
+      "win_rate": 0.0,
+      "average_reward": 0.0,
+      "average_final_net_worth": 1500.0,
+      "properties_purchased": 0,
+      "houses_built": 0,
+      "jail_fines_paid": 0
+    },
+    "player_3": {
+      "wins": 0,
+      "win_rate": 0.0,
+      "average_reward": 0.0,
+      "average_final_net_worth": 1500.0,
+      "properties_purchased": 0,
+      "houses_built": 0,
+      "jail_fines_paid": 0
+    }
+  }
+}

@@ -33,9 +33,9 @@ def initialize_game(board_json_path, player_names, starting_cash=1500):
         GameLogic: An initialized game logic instance.
     """
     players = []
-    for name in player_names:
-        # Create a new Player with the provided name and starting cash.
-        players.append(Player(player_name=name, current_cash=starting_cash))
+    for i, name in enumerate(player_names):
+        # Create a new Player with the provided name, player ID, and starting cash.
+        players.append(Player(player_name=name, player_id=i, current_cash=starting_cash))
 
     # Create and return the GameLogic instance using the board JSON and list of players.
     return GameLogic(board_json_path, players)

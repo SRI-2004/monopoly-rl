@@ -63,6 +63,11 @@ class GameLogic:
             self.board.state[idx, 7] = 0.0 # No hotels
         
         player.assets.clear()
+        
+        # Reset player counts and monopolies
+        player.num_railroads_possessed = 0
+        player.num_utilities_possessed = 0
+        player.full_color_sets_possessed.clear()
 
         # Check for a winner
         self._check_for_winner()
@@ -75,6 +80,48 @@ class GameLogic:
         active_players = [p for p in self.players if p.status != 'lost']
         if len(active_players) == 1:
             active_players[0].update_status('won')
+
+    def _update_player_monopolies(self, player):
+        """
+        Update a player's full_color_sets_possessed based on current board state.
+        """
+        # Get all unique color groups
+        color_groups = set()
+        for prop in self.board.properties_meta:
+            if prop.get("color_group"):
+                color_groups.add(prop["color_group"])
+        
+        # Check each color group
+        for color_group in color_groups:
+            color_props = [prop for prop in self.board.properties_meta if prop.get("color_group") == color_group]
+            
+            # Check if player owns all properties in this color group
+            owns_all = True
+            for prop in color_props:
+                if prop["id"] not in player.assets:
+                    owns_all = False
+                    break
+            
+            if owns_all:
+                player.add_full_color_set(color_group)
+            else:
+                player.remove_full_color_set(color_group)
+
+    def _update_player_counts(self, player):
+        """
+        Update a player's railroad and utility counts based on their current assets.
+        """
+        player.num_railroads_possessed = 0
+        player.num_utilities_possessed = 0
+        
+        for prop_id in player.assets:
+            prop_meta = self.board.properties_meta_by_id.get(prop_id)
+            if prop_meta:
+                prop_type = prop_meta.get("type")
+                if prop_type == "railroad":
+                    player.num_railroads_possessed += 1
+                elif prop_type == "utility":
+                    player.num_utilities_possessed += 1
 
     def _go_to_jail(self, player):
         """
@@ -826,6 +873,16 @@ class GameLogic:
         owner_vector = np.zeros(self.board.num_owners, dtype=np.float32)
         owner_vector[player.player_id + 1] = 1.0 # +1 because bank is owner 0
         self.board.state[prop_idx, 0:self.board.num_owners] = owner_vector
+
+        # Update player counts and monopolies
+        self._update_player_counts(player)
+        prop_type = prop_meta.get("type")
+        if prop_type == "street":
+            color_group = prop_meta.get("color_group")
+            if color_group:
+                self.board.update_monopoly_flag(color_group)
+                # Check if player now has a monopoly
+                self._update_player_monopolies(player)
 
         # Player bought it, so the option is gone.
         player.set_option_to_buy(False)

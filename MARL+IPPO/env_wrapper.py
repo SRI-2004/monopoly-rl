@@ -30,20 +30,16 @@ def preprocess_obs(obs, num_players, agent_id_int):
     # Add the board state
     board_vec = obs["board"].flatten()
     
-    # Add current player ID as a scalar
-    current_player_vec = np.array([obs["current_player_id"]], dtype=np.float32)
-    
     # Add pending trade information
     pending_trade_vec = np.array([obs["pending_trade_valid"]], dtype=np.float32)
     
     # Add trade details (flattened)
     trade_details_vec = obs["trade_details"].flatten()
     
-    # Concatenate all vectors
+    # Concatenate all vectors (removed redundant current_player_id)
     full_obs = np.concatenate([
         player_vec,
         board_vec,
-        current_player_vec,
         pending_trade_vec,
         trade_details_vec
     ])
@@ -254,8 +250,8 @@ class MonopolyMAv2(ParallelEnv):
         if 'result' in info:
             result = info['result']
             
-            # Property purchases
-            if 'purchased' in result.lower():
+            # Property purchases - look for multiple patterns
+            if any(word in result.lower() for word in ['purchased', 'bought', 'acquired']):
                 counters['properties_purchased'] += 1
                 
             # House/hotel building
@@ -462,6 +458,11 @@ class MonopolyMAv2(ParallelEnv):
                 infos[agent_id]['all_behavioral_metrics'] = {
                     agent: counters for agent, counters in self.episode_metrics['behavioral_counters'].items()
                 }
+        
+        # Always include current behavioral metrics for the active agent
+        if current_agent_id in infos and 'behavioral_metrics' in infos[current_agent_id]:
+            # Update the global step count in behavioral metrics
+            infos[current_agent_id]['behavioral_metrics']['global_step'] = self.step_count
 
         return observations, rewards, terminations, truncations, infos
 
@@ -515,7 +516,7 @@ class MonopolyMAv2(ParallelEnv):
             'total_properties_purchased': total_properties,
             'total_houses_built': total_houses,
             'total_trades_proposed': total_trades,
-            'game_completion_type': 'natural' if not truncations.get(winner, False) else 'truncated',
+            'game_completion_type': 'natural' if self.step_count < self.internal_env.max_steps else 'truncated',
             'player_behavioral_summary': {
                 agent_id: {
                     'total_actions': len(self.episode_metrics['player_actions'][agent_id]),

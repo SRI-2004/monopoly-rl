@@ -30,6 +30,7 @@ class Player:
     def __init__(
             self,
             player_name: str,
+            player_id: int = 0,
             current_position: int = 0,
             status: str = 'waiting_for_move',
             has_get_out_of_jail_community_chest_card: bool = False,
@@ -45,6 +46,7 @@ class Player:
             phase: str = 'pre-roll'
     ):
         self.player_name = player_name
+        self.player_id = player_id
         self.current_position = current_position
 
         if status not in Player.VALID_STATUSES:
@@ -132,15 +134,11 @@ class Player:
     def add_asset(self, asset):
         """
         Add an asset (property, railroad, or utility) to the player's holdings.
-        Expects asset to have at least an attribute 'type'.
+        Asset can be either a property ID (int) or an object with a 'type' attribute.
         """
         self.assets.add(asset)
-        if hasattr(asset, "type"):
-            asset_type = asset.type.lower()
-            if asset_type == "railroad":
-                self.num_railroads_possessed += 1
-            elif asset_type == "utility":
-                self.num_utilities_possessed += 1
+        # Note: Railroad/utility counting is now handled in GameLogic.buy_property()
+        # to avoid duplicating the logic here since we need access to property metadata
 
     def remove_asset(self, asset):
         """
@@ -148,12 +146,8 @@ class Player:
         """
         if asset in self.assets:
             self.assets.remove(asset)
-            if hasattr(asset, "type"):
-                asset_type = asset.type.lower()
-                if asset_type == "railroad" and self.num_railroads_possessed > 0:
-                    self.num_railroads_possessed -= 1
-                elif asset_type == "utility" and self.num_utilities_possessed > 0:
-                    self.num_utilities_possessed -= 1
+            # Note: Railroad/utility counting is now handled in GameLogic methods
+            # to avoid duplicating the logic here since we need access to property metadata
 
     def add_full_color_set(self, color: str):
         """

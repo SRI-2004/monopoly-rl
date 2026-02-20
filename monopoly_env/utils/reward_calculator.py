@@ -36,29 +36,39 @@ class RewardCalculator:
         # Initialize previous net worth for each player.
         self.prev_networth = {p.player_name: self.compute_networth(p) for p in players}
         
-        # --- Behavioral Metrics Tracking ---
-        self.behavioral_metrics = {
-            "properties_purchased": 0,
-            "houses_built": 0,
-            "jail_fines_paid": 0,
-        }
+        # --- Behavioral Metrics Tracking (Per Player) ---
+        self.behavioral_metrics = {}
+        for player in players:
+            self.behavioral_metrics[player.player_name] = {
+                "properties_purchased": 0,
+                "houses_built": 0,
+                "jail_fines_paid": 0,
+            }
 
     def reset_baseline(self, players):
         self.prev_networth = {p.player_name: self.compute_networth(p) for p in players}
-        self.behavioral_metrics = {
-            "properties_purchased": 0,
-            "houses_built": 0,
-            "jail_fines_paid": 0,
-        }
+        self.behavioral_metrics = {}
+        for player in players:
+            self.behavioral_metrics[player.player_name] = {
+                "properties_purchased": 0,
+                "houses_built": 0,
+                "jail_fines_paid": 0,
+            }
+
+    def get_behavioral_metrics(self):
+        """Returns the current behavioral metrics without resetting them."""
+        return self.behavioral_metrics.copy()
 
     def get_and_reset_behavioral_metrics(self):
-        """Returns the current behavioral metrics and resets them."""
+        """Returns the current behavioral metrics and resets them. Only used for game end."""
         metrics = self.behavioral_metrics.copy()
-        self.behavioral_metrics = {
-            "properties_purchased": 0,
-            "houses_built": 0,
-            "jail_fines_paid": 0,
-        }
+        self.behavioral_metrics = {}
+        for player in self.players:
+            self.behavioral_metrics[player.player_name] = {
+                "properties_purchased": 0,
+                "houses_built": 0,
+                "jail_fines_paid": 0,
+            }
         return metrics
 
     def compute_networth(self, player):
@@ -170,13 +180,13 @@ class RewardCalculator:
         # 3. Buy bonus
         buy_bonus = self.config['buy_bonus'] if action_info.get('purchased_property', False) else 0.0
         if buy_bonus > 0:
-            self.behavioral_metrics['properties_purchased'] += 1
+            self.behavioral_metrics[current_player.player_name]['properties_purchased'] += 1
             
         # 4. Build bonus
         houses_built = action_info.get('houses_built', 0)
         build_bonus = self.config['build_bonus_per_house'] * houses_built
         if houses_built > 0:
-            self.behavioral_metrics['houses_built'] += houses_built
+            self.behavioral_metrics[current_player.player_name]['houses_built'] += houses_built
 
         # --- New: Monopoly Completion Bonus ---
         # Detect if a new monopoly was formed this step
@@ -188,7 +198,7 @@ class RewardCalculator:
 
         # Track jail fines paid for analytics
         if action_info.get('paid_jail_fine', False):
-            self.behavioral_metrics['jail_fines_paid'] += 1
+            self.behavioral_metrics[current_player.player_name]['jail_fines_paid'] += 1
 
         # 5. Time penalty (now using normalized value)
         time_penalty = self.time_penalty_per_step

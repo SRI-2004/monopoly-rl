@@ -1,4 +1,6 @@
 pettingzoo==1.24.3
 gymnasium==0.29.1
 numpy==1.26.4
-tqdm==4.66.4 
+tqdm==4.66.4
+pandas>=1.5.0
+pyarrow>=10.0.0 

@@ -265,4 +265,16 @@ class Board:
         """Returns the full board metadata dictionary."""
         return self.board_meta
 
+    def get_property_meta_by_board_id(self, board_id):
+        """
+        Get property metadata by board position ID.
+        
+        Parameters:
+            board_id (int): The board position ID (0-39 for standard Monopoly)
+            
+        Returns:
+            dict: Property metadata if it exists, None otherwise
+        """
+        return self.board_map.get(board_id)
+
 

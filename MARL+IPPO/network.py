@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import numpy as np
 from torch.distributions import Categorical
 
 class ActorCritic(nn.Module):
@@ -54,7 +55,7 @@ class ActorCritic(nn.Module):
         # Critic head
         self.value_head = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x, hidden_state, top_action=None):
+    def forward(self, x, hidden_state, top_action=None, action_mask=None):
         """
         Forward pass through the network with hierarchical action embedding.
 
@@ -63,6 +64,7 @@ class ActorCritic(nn.Module):
             hidden_state (torch.Tensor): The hidden state for the GRU.
             top_action (torch.Tensor, optional): The top-level action for context.
                                                If None, uses argmax of top logits.
+            action_mask (tuple, optional): Action mask [top_mask, sub_masks] for masking invalid actions.
 
         Returns:
             tuple: A tuple containing:
@@ -100,23 +102,50 @@ class ActorCritic(nn.Module):
 
         return top_level_logits, sub_action_logits, value, hidden_state
 
-    def get_action_and_value(self, x, hidden_state, deterministic=False):
+    def get_action_and_value(self, x, hidden_state, deterministic=False, action_mask=None):
         """
         Optimized single-pass action and value computation with hierarchical sampling.
         
         This method avoids double forward passes by computing everything in one go
         and using the sampled top action for sub-action context.
+        
+        Args:
+            x: Input observation tensor
+            hidden_state: GRU hidden state
+            deterministic: Whether to use deterministic action selection
+            action_mask: Optional action mask [top_mask, sub_masks] where:
+                        - top_mask: [12] boolean mask for top-level actions
+                        - sub_masks: [12, 252] boolean masks for sub-actions per top-action
         """
         # Pass input through shared backbone once
         x = self.mlp(x)
         x, new_hidden = self.gru(x.unsqueeze(0), hidden_state)
         gru_output = x.squeeze(0)
 
-        # Get top-level action logits and sample
+        # Get top-level action logits
         top_logits = self.policy_head_top(gru_output)
-        top_dist = Categorical(logits=top_logits)
+        
+        # Apply action mask to top-level actions if provided
+        if action_mask is not None:
+            top_mask, sub_masks = action_mask
+            # Convert to tensor if needed
+            if isinstance(top_mask, (list, tuple, np.ndarray)):
+                top_mask = torch.tensor(top_mask, dtype=torch.bool, device=top_logits.device)
+            
+            # Ensure mask has same batch dimension as logits
+            if top_mask.dim() == 1 and top_logits.dim() == 2:
+                top_mask = top_mask.unsqueeze(0).expand_as(top_logits)
+            
+            # Mask invalid actions with large negative values
+            masked_top_logits = top_logits.clone()
+            masked_top_logits[~top_mask] = -1e8
+            
+            top_dist = Categorical(logits=masked_top_logits)
+        else:
+            top_dist = Categorical(logits=top_logits)
+        
         if deterministic:
-            top_action = torch.argmax(top_logits, dim=-1)
+            top_action = torch.argmax(top_dist.logits, dim=-1)
         else:
             top_action = top_dist.sample()
         
@@ -125,10 +154,29 @@ class ActorCritic(nn.Module):
         combined_features = torch.cat([gru_output, top_embed], dim=-1)
         sub_logits = self.sub_action_processor(combined_features)
         
-        # Sample sub-action
-        sub_dist = Categorical(logits=sub_logits)
+        # Apply sub-action mask if provided
+        if action_mask is not None:
+            top_idx = top_action.item() if top_action.dim() == 0 else top_action[0].item()
+            sub_mask = sub_masks[top_idx]
+            
+            # Convert to tensor if needed
+            if isinstance(sub_mask, (list, tuple, np.ndarray)):
+                sub_mask = torch.tensor(sub_mask, dtype=torch.bool, device=sub_logits.device)
+            
+            # Ensure mask has same batch dimension as logits
+            if sub_mask.dim() == 1 and sub_logits.dim() == 2:
+                sub_mask = sub_mask.unsqueeze(0).expand_as(sub_logits)
+            
+            # Mask invalid sub-actions
+            masked_sub_logits = sub_logits.clone()
+            masked_sub_logits[~sub_mask] = -1e8
+            
+            sub_dist = Categorical(logits=masked_sub_logits)
+        else:
+            sub_dist = Categorical(logits=sub_logits)
+        
         if deterministic:
-            sub_action = torch.argmax(sub_logits, dim=-1)
+            sub_action = torch.argmax(sub_dist.logits, dim=-1)
         else:
             sub_action = sub_dist.sample()
         

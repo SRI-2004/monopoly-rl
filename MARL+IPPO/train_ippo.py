@@ -24,6 +24,8 @@ def schedule_factory(schedule_str, total_timesteps):
     - "fixed:VALUE" - constant value
     - "linear:START->END" - linear interpolation from START to END
     - "exponential:START->END" - exponential decay from START to END
+    - "cosine:START->END" - cosine annealing from START to END
+    - "piecewise:START->MID@STEP" - piecewise schedule with transition at STEP
     """
     if schedule_str.startswith("fixed:"):
         value = float(schedule_str.split(":")[1])
@@ -44,12 +46,37 @@ def schedule_factory(schedule_str, total_timesteps):
             progress = min(step / total_timesteps, 1.0)
             return start * (end / start) ** progress
         return schedule
-    else:
-        # Default to fixed value
-        value = float(schedule_str)
+    elif schedule_str.startswith("cosine:"):
+        start_end = schedule_str.split(":")[1]
+        start, end = map(float, start_end.split("->"))
         def schedule(step):
-            return value
+            progress = min(step / total_timesteps, 1.0)
+            cosine_factor = 0.5 * (1 + np.cos(np.pi * progress))
+            return end + (start - end) * cosine_factor
         return schedule
+    elif schedule_str.startswith("piecewise:"):
+        # Format: "piecewise:START->END@TRANSITION_STEP"
+        parts = schedule_str.split(":")[1]
+        start_part, transition_part = parts.split("@")
+        start, end = map(float, start_part.split("->"))
+        transition_step = int(transition_part)
+        def schedule(step):
+            if step < transition_step:
+                return start
+            else:
+                return end
+        return schedule
+    else:
+        # Try to parse as a simple float
+        try:
+            value = float(schedule_str)
+            def schedule(step):
+                return value
+            return schedule
+        except ValueError:
+            raise ValueError(f"Unsupported schedule format: {schedule_str}")
+            
+    return schedule
 
 # Global metrics storage for comprehensive logging
 training_metrics = {
@@ -368,17 +395,16 @@ def train(args):
                             action = scripted_agents[agent_id].get_action(next_obs_dict[agent_id])
                             action_dict[agent_id] = action
                         else:
-                            # Use learning agent policy
+                            # Use learning agent policy with action masking
                             processed_obs_np = preprocess_obs(next_obs_dict[agent_id], num_agents, int(agent_id.split('_')[-1]))
                             obs_tensor = torch.tensor(processed_obs_np, dtype=torch.float32, device=device).unsqueeze(0)
                             
-                            top_logits, sub_logits, value, next_hiddens[agent_id] = policies[agent_id](obs_tensor, next_hiddens[agent_id])
+                            # Get action mask from observation
+                            action_mask = next_obs_dict[agent_id].get('action_mask', None)
                             
-                            top_dist = torch.distributions.Categorical(logits=top_logits)
-                            sub_dist = torch.distributions.Categorical(logits=sub_logits)
-                            
-                            top_action = top_dist.sample()
-                            sub_action = sub_dist.sample()
+                            top_action, sub_action, top_log_prob, sub_log_prob, value, next_hiddens[agent_id] = policies[agent_id].get_action_and_value(
+                                obs_tensor, next_hiddens[agent_id], deterministic=False, action_mask=action_mask
+                            )
                             
                             action_dict[agent_id] = (top_action.item(), sub_action.item())
                             
@@ -387,8 +413,8 @@ def train(args):
                                 storage[agent_id]["obs"][step, 0] = obs_tensor.squeeze(0)
                                 storage[agent_id]["actions_top"][step, 0] = top_action
                                 storage[agent_id]["actions_sub"][step, 0] = sub_action
-                                storage[agent_id]["log_probs_top"][step, 0] = top_dist.log_prob(top_action)
-                                storage[agent_id]["log_probs_sub"][step, 0] = sub_dist.log_prob(sub_action)
+                                storage[agent_id]["log_probs_top"][step, 0] = top_log_prob
+                                storage[agent_id]["log_probs_sub"][step, 0] = sub_log_prob
                                 storage[agent_id]["values"][step, 0] = value.flatten()
                                 storage[agent_id]["dones"][step, 0] = next_done[agent_id]
                     
@@ -408,29 +434,31 @@ def train(args):
                         next_done[agent_id] = torch.tensor(float(terminated[agent_id] or truncated[agent_id])).to(device)
                 else:
                     # --- Parallel Acting ---
+                    # For parallel environments, actions need to be arrays per agent
+                    agent_actions = {agent_id: [] for agent_id in agent_ids}
+                    
                     for i, agent_id in enumerate(agent_ids):
                         agent_obs = torch.tensor(next_obs_stacked[:, i, :], dtype=torch.float32, device=device)
                         
-                        top_logits, sub_logits, value, next_hiddens[agent_id] = policies[agent_id](agent_obs, next_hiddens[agent_id])
+                        # Note: For parallel environments, we need to extract action masks from observations
+                        # This is a simplified version - in practice, you'd need to properly handle batched masks
+                        top_action, sub_action, top_log_prob, sub_log_prob, value, next_hiddens[agent_id] = policies[agent_id].get_action_and_value(
+                            agent_obs, next_hiddens[agent_id], deterministic=False, action_mask=None  # TODO: Implement batched action masking
+                        )
                         
-                        top_dist = torch.distributions.Categorical(logits=top_logits)
-                        sub_dist = torch.distributions.Categorical(logits=sub_logits)
-                        
-                        top_action = top_dist.sample()
-                        sub_action = sub_dist.sample()
-                        
-                        action_dict[agent_id] = (top_action.cpu().numpy(), sub_action.cpu().numpy())
+                        # Store actions as arrays for parallel environments
+                        agent_actions[agent_id] = np.column_stack([top_action.cpu().numpy(), sub_action.cpu().numpy()])
                         
                         storage[agent_id]["obs"][step] = agent_obs
                         storage[agent_id]["actions_top"][step] = top_action
                         storage[agent_id]["actions_sub"][step] = sub_action
-                        storage[agent_id]["log_probs_top"][step] = top_dist.log_prob(top_action)
-                        storage[agent_id]["log_probs_sub"][step] = sub_dist.log_prob(sub_action)
+                        storage[agent_id]["log_probs_top"][step] = top_log_prob
+                        storage[agent_id]["log_probs_sub"][step] = sub_log_prob
                         storage[agent_id]["values"][step] = value.flatten()
                         storage[agent_id]["dones"][step] = next_done[agent_id]
                     
                     # Step the environment
-                    next_obs_stacked, rewards, terminated, truncated, info = envs.step(action_dict)
+                    next_obs_stacked, rewards, terminated, truncated, info = envs.step(agent_actions)
                     
                     # Log comprehensive metrics for parallel phase
                     for agent_id in agent_ids:
@@ -682,7 +710,7 @@ if __name__ == "__main__":
     parser.add_argument("--board-json", type=str, default="/home/srinivasan/PycharmProjects/monopoly-rl/monopoly_env/core/data.json", help="Path to board json")
     parser.add_argument("--num-players", type=int, default=4, help="Number of players")
     parser.add_argument("--max-steps", type=int, default=5000, help="Max steps per episode")
-    parser.add_argument("--total-timesteps", type=int, default=10_000_000, help="Total number of timesteps for training")
+    parser.add_argument("--total-timesteps", type=int, default=10_000, help="Total number of timesteps for training")
     parser.add_argument("--cuda", action="store_true", help="Use CUDA if available")
     # PPO hyper-set from plan
     parser.add_argument("--gamma", type=float, default=0.995)

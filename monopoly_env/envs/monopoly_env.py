@@ -214,9 +214,9 @@ class MonopolyEnv(gym.Env):
 
         # Create action_info dict for the reward calculator
         action_info = {
-            'purchased_property': adjusted_action == 2, # Assuming action 2 is "purchase"
+            'purchased_property': adjusted_action == 11, # Action 10 (0-indexed) + 1 = 11 is "Buy Property"
             'houses_built': houses_built,
-            'paid_jail_fine': adjusted_action == 6, # Assuming action 6 is "pay jail fine"
+            'paid_jail_fine': adjusted_action == 10, # Action 9 (0-indexed) + 1 = 10 is "Pay Jail Fine"
         }
 
         # Compute dense reward for the current player using the new logic
@@ -247,15 +247,38 @@ class MonopolyEnv(gym.Env):
 
         # The info dict should contain all relevant data for analytics
         net_worths_for_info = {p.player_name: self.reward_calculator.compute_networth(p) for p in self.players}
+        
+        # Use the resetting version only when the game ends, otherwise use the non-resetting version
+        if terminated:
+            all_behavioral_metrics = self.reward_calculator.get_and_reset_behavioral_metrics()
+            # Get the current player's metrics for this step's info
+            behavioral_metrics = all_behavioral_metrics.get(current_player.player_name, {
+                "properties_purchased": 0,
+                "houses_built": 0,
+                "jail_fines_paid": 0,
+            })
+        else:
+            all_behavioral_metrics = self.reward_calculator.get_behavioral_metrics()
+            # Get the current player's metrics for this step's info
+            behavioral_metrics = all_behavioral_metrics.get(current_player.player_name, {
+                "properties_purchased": 0,
+                "houses_built": 0,
+                "jail_fines_paid": 0,
+            })
+            
         info = {
             "result": result_msg, 
             "step": self.current_step,
-            "behavioral_metrics": self.reward_calculator.get_and_reset_behavioral_metrics(),
+            "behavioral_metrics": behavioral_metrics,
             "net_worths": net_worths_for_info,
             "status": current_player.status,
             'semantic_features': {p.player_name: {'net_worth': w} for p, w in zip(self.players, net_worths_for_info.values())}
         }
         
+        # Add all players' behavioral metrics for game end analysis
+        if terminated:
+            info['all_behavioral_metrics'] = all_behavioral_metrics
+
         return self._get_obs(), reward, terminated, truncated, info
 
     def _get_obs(self):
